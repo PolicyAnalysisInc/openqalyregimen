@@ -1,0 +1,15 @@
+^LICENSE\.md$
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.circleci$
+^\.circleci/config\.yml$
+^README\.Rmd$
+env.RData
+^codecov\.yml$
+.radian_history
+^doc$
+^Meta$
+^_pkgdown\.yml$
+^docs$
+^pkgdown$
+^\.github$
