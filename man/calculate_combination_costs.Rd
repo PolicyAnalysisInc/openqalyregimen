@@ -15,5 +15,6 @@ calculate_combination_costs(regimens, ...)
 A data.frame with per-cycle totals and per-drug breakdowns.
 }
 \description{
-Calculate combined cost for a list of regimens
+\strong{Deprecated.} Use \code{\link[=calculate_med_costs]{calculate_med_costs()}} instead, passing
+regimens as separate arguments rather than a list.
 }

@@ -1,3 +1,3 @@
-## usethis namespace: start
-## usethis namespace: end
+#' @useDynLib openqalyregimen, .registration = TRUE
+#' @importFrom Rcpp sourceCpp
 NULL

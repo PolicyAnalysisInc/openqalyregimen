@@ -13,6 +13,8 @@ cost_single_admin_drug(reg)
 Numeric scalar: drug cost only (no admin cost) of one admin.
 }
 \description{
-Cost of a single administration (dispatch by route)
+When distribution parameters (patient_weight_sd or patient_bsa_sd) are
+present, computes the weighted average cost across quantile bins of the
+patient parameter distribution.
 }
 \keyword{internal}

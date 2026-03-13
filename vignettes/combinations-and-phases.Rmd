@@ -1,0 +1,383 @@
+---
+title: "Combination Therapies, Loading Doses, and Phase Changes"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Combination Therapies, Loading Doses, and Phase Changes}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+library(openqalyregimen)
+library(flextable)
+```
+
+This vignette shows how to combine multiple drugs, model loading doses, dose
+escalation, and phase changes using `openqalyregimen`. It assumes familiarity
+with single-drug oral and IV costing covered in `vignette("oral-regimens")`
+and `vignette("iv-regimens")`.
+
+## 1. Combination Therapies
+
+To cost a multi-drug combination, pass multiple `med_regimen` objects to
+`calculate_med_costs()`. Drugs in a combination can have different `admin_days`.
+Here Drug C is given on Day 1 only, while Drug D is given on Days 1 and 8 of a
+21-day cycle (a cisplatin + gemcitabine-like schedule):
+
+```{r combo-define}
+drug_day1 <- define_regimen(
+  name = "IV Drug C",
+  route = "iv",
+  dose_per_admin = 70,
+  dose_basis = "bsa",
+  patient_bsa = 1.8,
+  patient_bsa_sd = 0.2,
+  med_cycle_length = 21,
+  admin_days = c(1),
+  max_med_cycles = 6,
+  vial_sizes = c(50, 100),
+  vial_cost = c(5.21, 10.42),
+  wastage_threshold = 0.1,
+  admin_cost = 241
+)
+
+drug_day1_8 <- define_regimen(
+  name = "IV Drug D",
+  route = "iv",
+  dose_per_admin = 1000,
+  dose_basis = "bsa",
+  patient_bsa = 1.8,
+  patient_bsa_sd = 0.2,
+  med_cycle_length = 21,
+  admin_days = c(1, 8),
+  max_med_cycles = 6,
+  vial_sizes = c(200, 1000, 2000),
+  vial_cost = c(3.80, 15.95, 31.90),
+  wastage_threshold = 0.1,
+  admin_cost = 241
+)
+```
+
+Setting `daily_detail = TRUE` with multiple regimens produces a wide-format
+table with both drugs side by side. This makes the different schedules visible:
+Drug C has cost only on Day 1, while Drug D has cost on Days 1 and 8.
+
+The `combo_regimen_daily_detail` table has a two-row header:
+
+- **Top row** groups columns by drug name.
+- **Bottom row** shows the column type within each drug group.
+- **Shared columns**: Day, Model Cycle.
+- **Combined Total Cost** = sum of per-drug Total Cost columns for each day.
+
+```{r combo-daily}
+combo_daily <- calculate_med_costs(
+  drug_day1, drug_day1_8,
+  model_cycle_length = 21,
+  n_cycles = 2,
+  daily_detail = TRUE
+)
+
+as_flextable(combo_daily)
+```
+
+**Verify:** Drug C is administered on days 0 and 21 only. Drug D is
+administered on days 0, 7, 21, and 28. On day 0, both drugs incur costs; on
+day 7, only Drug D does.
+
+The cycle-level `combo_regimen_costs` table aggregates daily costs into one row
+per model cycle:
+
+- **Top row** groups columns by drug name. Shared columns (Cycle, Start Day,
+  End Day) and the Combined Total column are standalone.
+- **Bottom row** shows the column type within each drug group: Drug Cost, Admin
+  Cost, Total Cost.
+- **Combined Total** column = sum of all per-drug Total Cost columns.
+
+```{r combo-cycle}
+combo_costs <- calculate_med_costs(
+  drug_day1, drug_day1_8,
+  model_cycle_length = 21,
+  n_cycles = 6
+)
+
+as_flextable(combo_costs)
+```
+
+**Verify:** Drug C has 1 administration per cycle, Drug D has 2. Mean doses:
+Drug C = 126 mg, Drug D = 1,800 mg per administration, both
+distribution-averaged with BSA SD = 0.2.
+
+Dosing diagnostics are always per-drug. Drug C:
+
+```{r combo-dosing-c}
+as_flextable(diagnose_dosing(drug_day1))
+```
+
+Drug D:
+
+```{r combo-dosing-d}
+as_flextable(diagnose_dosing(drug_day1_8))
+```
+
+## 2. Sharing Administration Costs
+
+When multiple IV drugs are administered on the same day during a single clinic
+visit, they may share infusion chair time. The `shared_admin` parameter
+controls this. Without sharing (the default), each drug's `admin_cost` is
+charged independently on every administration day.
+
+With `shared_admin = TRUE`, drugs share a single administration cost on
+overlapping days. The highest cost in the group is kept; the rest are zeroed
+out. The daily detail makes the effect visible — on Day 1 both drugs are
+administered, so only Drug C's higher admin cost (\$241) is charged. On Day 8,
+only Drug D is administered, so sharing has no effect:
+
+```{r shared-admin-daily}
+shared_daily <- calculate_med_costs(
+  drug_day1, drug_day1_8,
+  model_cycle_length = 21,
+  n_cycles = 2,
+  daily_detail = TRUE,
+  shared_admin = TRUE
+)
+
+as_flextable(shared_daily)
+```
+
+The `Admin (Pre-Share)` columns show the original admin costs before sharing
+adjustment. At the cycle level, the savings accumulate:
+
+```{r shared-admin-cycle}
+shared_costs <- calculate_med_costs(
+  drug_day1, drug_day1_8,
+  model_cycle_length = 21,
+  n_cycles = 6,
+  shared_admin = TRUE
+)
+
+as_flextable(shared_costs)
+```
+
+**Verify:** On Day 1, both drugs have \$241 admin cost. With sharing, Drug C
+wins (first by input order on ties) and Drug D's admin is zeroed. On Day 8,
+only Drug D is present so its \$241 is charged normally. Per cycle: \$241 saved
+vs. no sharing.
+
+You can also use explicit groups when only some drugs share admin costs:
+
+```r
+calculate_med_costs(
+  drug_a, drug_b, drug_c,
+  shared_admin = list(c("Drug A", "Drug B"))  # Drug C is independent
+)
+```
+
+## 3. Costing an IV + Oral Combination
+
+IV and oral drugs combine seamlessly. Here an IV drug is given on Day 1 and an
+oral drug is taken on Days 1--14 of a 21-day cycle (a CAPOX-like schedule). If
+the clinical regimen is twice daily, the table or direct definition should
+encode the total daily dose in `dose_per_admin`; `admin_days` only identifies
+which days the drug is taken:
+
+```{r combo-mixed}
+iv_drug <- define_regimen(
+  name = "IV Drug E",
+  route = "iv",
+  dose_per_admin = 130,
+  dose_basis = "bsa",
+  patient_bsa = 1.8,
+  patient_bsa_sd = 0.2,
+  med_cycle_length = 21,
+  admin_days = c(1),
+  max_med_cycles = 8,
+  vial_sizes = c(50, 100, 200),
+  vial_cost = c(12.32, 24.64, 49.28),
+  wastage_threshold = 0.1,
+  admin_cost = 241
+)
+
+oral_drug <- define_regimen(
+  name = "Oral Drug F",
+  route = "oral",
+  dose_per_admin = 2000,
+  dose_basis = "bsa",
+  patient_bsa = 1.8,
+  med_cycle_length = 21,
+  admin_days = 1:14,
+  max_med_cycles = 8,
+  available_strengths = c(150, 500),
+  unit_cost = 2.21,
+  admin_cost = 0
+)
+
+combo_mixed <- calculate_med_costs(
+  iv_drug, oral_drug,
+  model_cycle_length = 21,
+  n_cycles = 8
+)
+
+as_flextable(combo_mixed)
+```
+
+**Verify:** The combination cost sums both components. IV Drug E mean dose =
+130 x 1.8 = 234 mg (distribution-averaged). Oral Drug F daily dose = 2,000 x
+1.8 = 3,600 mg on each treatment day, with 14 treatment days per cycle.
+
+Dosing diagnostic for the IV component:
+
+```{r combo-mixed-dosing}
+as_flextable(diagnose_dosing(iv_drug))
+```
+
+The daily detail view shows both drugs side by side. IV drugs get vial-specific
+columns (mg Vials, mg Waste, Vials); oral drugs get tablet/dispensing columns
+(Disp?, Tabs, etc.):
+
+```{r combo-mixed-daily}
+combo_mixed_daily <- calculate_med_costs(
+  iv_drug, oral_drug,
+  model_cycle_length = 21,
+  n_cycles = 2,
+  daily_detail = TRUE
+)
+
+as_flextable(combo_mixed_daily)
+```
+
+## 4. Modeling a Loading Dose
+
+Some drugs use a higher first dose (loading) followed by a lower maintenance
+dose. Model this as two separate regimen objects with `start_day` offsets.
+
+The key formula for phase sequencing: a phase runs from `start_day` to
+`start_day + max_med_cycles * med_cycle_length`. The next phase's `start_day`
+should equal the previous phase's end.
+
+Here a drug has an 8 mg/kg loading dose for 1 cycle, then 6 mg/kg maintenance
+(a trastuzumab-like schedule). The loading phase occupies days 0--20
+(`start_day = 0, max_med_cycles = 1, med_cycle_length = 21`), and the
+maintenance phase begins on day 21:
+
+```{r loading}
+loading <- define_regimen(
+  name = "Drug G (loading)",
+  route = "iv",
+  dose_per_admin = 8,
+  dose_basis = "weight",
+  patient_weight = 70,
+  patient_weight_sd = 12,
+  med_cycle_length = 21,
+  admin_days = 1,
+  max_med_cycles = 1,
+  start_day = 0,
+  vial_sizes = c(150, 420),
+  vial_cost = c(407.40, 1184),
+  wastage_threshold = 0.1
+)
+
+maintenance <- define_regimen(
+  name = "Drug G (maintenance)",
+  route = "iv",
+  dose_per_admin = 6,
+  dose_basis = "weight",
+  patient_weight = 70,
+  patient_weight_sd = 12,
+  med_cycle_length = 21,
+  admin_days = 1,
+  max_med_cycles = Inf,
+  start_day = 21,
+  vial_sizes = c(150, 420),
+  vial_cost = c(407.40, 1184),
+  wastage_threshold = 0.1
+)
+
+loading_costs <- calculate_med_costs(
+  loading, maintenance,
+  model_cycle_length = 21,
+  n_cycles = 26
+)
+
+as_flextable(loading_costs)
+```
+
+**Verify:** Loading dose = 8 x 70 = 560 mg incurs a higher cost in cycle 1.
+Maintenance dose = 6 x 70 = 420 mg runs from cycle 2 onward. Both phases use
+distribution-averaged costs with `patient_weight_sd = 12`.
+
+Dosing diagnostics confirm different vial selections for the loading phase:
+
+```{r loading-dosing-load}
+as_flextable(diagnose_dosing(loading))
+```
+
+And the maintenance phase:
+
+```{r loading-dosing-maint}
+as_flextable(diagnose_dosing(maintenance))
+```
+
+## 5. Modeling Dose Escalation
+
+Multi-week dose ramp-ups are modeled by chaining multiple regimen objects with
+sequential `start_day` values. The formula for the next start day:
+`next_start_day = current_start_day + max_med_cycles * med_cycle_length`.
+
+Here a drug ramps through 20/50/100/200 mg/day over 4 weeks before reaching
+400 mg/day maintenance (a venetoclax-like schedule):
+
+```{r escalation}
+strengths <- c(10, 50, 100)
+cost_tab  <- 42.76
+
+wk1 <- define_regimen(
+  name = "Escalation Wk1", route = "oral",
+  dose_per_admin = 20, med_cycle_length = 7,
+  admin_days = 1:7, max_med_cycles = 1, start_day = 0,
+  available_strengths = strengths, unit_cost = cost_tab
+)
+
+wk2 <- define_regimen(
+  name = "Escalation Wk2", route = "oral",
+  dose_per_admin = 50, med_cycle_length = 7,
+  admin_days = 1:7, max_med_cycles = 1, start_day = 7,
+  available_strengths = strengths, unit_cost = cost_tab
+)
+
+wk3 <- define_regimen(
+  name = "Escalation Wk3", route = "oral",
+  dose_per_admin = 100, med_cycle_length = 7,
+  admin_days = 1:7, max_med_cycles = 1, start_day = 14,
+  available_strengths = strengths, unit_cost = cost_tab
+)
+
+wk4 <- define_regimen(
+  name = "Escalation Wk4", route = "oral",
+  dose_per_admin = 200, med_cycle_length = 7,
+  admin_days = 1:7, max_med_cycles = 1, start_day = 21,
+  available_strengths = strengths, unit_cost = cost_tab
+)
+
+maint <- define_regimen(
+  name = "Maintenance", route = "oral",
+  dose_per_admin = 400, med_cycle_length = 28,
+  admin_days = 1:28, max_med_cycles = Inf, start_day = 28,
+  available_strengths = strengths, unit_cost = cost_tab
+)
+
+esc_costs <- calculate_med_costs(
+  wk1, wk2, wk3, wk4, maint,
+  model_cycle_length = 7,
+  n_cycles = 52
+)
+
+as_flextable(esc_costs)
+```
+
+**Verify:** Weeks 1--4 each show escalating costs reflecting 20, 50, 100, and
+200 mg daily doses. From week 5 onward, the maintenance phase (400 mg = 4 x
+100 mg tablets) dominates.

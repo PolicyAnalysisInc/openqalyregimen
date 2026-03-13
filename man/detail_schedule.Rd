@@ -8,7 +8,8 @@ detail_schedule(
   regimen,
   model_cycle_length = 7,
   n_cycles = 52,
-  cycle_times = NULL
+  cycle_times = NULL,
+  simple_daily_cost = FALSE
 )
 }
 \arguments{
@@ -19,6 +20,9 @@ detail_schedule(
 \item{n_cycles}{Integer. Number of model cycles.}
 
 \item{cycle_times}{Numeric vector. Custom cycle start times.}
+
+\item{simple_daily_cost}{Logical. If TRUE (and regimen has cost_per_day),
+produces one row per day with flat daily costs.}
 }
 \value{
 A data.frame with one row per event (dispensing or administration).

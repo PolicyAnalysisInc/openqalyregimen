@@ -5,17 +5,18 @@
 \title{Calculate medication costs cycle-by-cycle for a Markov model}
 \usage{
 calculate_med_costs(
-  regimen,
+  ...,
   model_cycle_length = 7,
   n_cycles = 52,
   cycle_times = NULL,
   subcycle_precision = FALSE,
   daily_detail = FALSE,
-  simple_daily_cost = FALSE
+  simple_daily_cost = FALSE,
+  shared_admin = NULL
 )
 }
 \arguments{
-\item{regimen}{A \code{med_regimen} object (from
+\item{...}{One or more \code{med_regimen} objects (from
 \code{define_regimen}).}
 
 \item{model_cycle_length}{Numeric. Length of one model cycle in days.}
@@ -42,13 +43,32 @@ includes a \code{model_cycle} column so you can
 aggregate yourself or inspect the raw schedule.}
 
 \item{simple_daily_cost}{Logical. If TRUE (and regimen has cost_per_day),
-simply returns cost_per_day × days per model cycle.}
+simply returns cost_per_day x days per model cycle.}
+
+\item{shared_admin}{Controls whether drugs in a combination share
+administration costs on overlapping days. When multiple drugs are
+administered on the same day, only the highest administration cost in
+a sharing group is charged; the others are zeroed out.
+\itemize{
+\item \code{NULL} (default): no sharing, backward compatible.
+\item \code{TRUE}: all drugs in one sharing group.
+\item A list of character vectors: explicit groups, e.g.
+\code{list(c("Drug A", "Drug B"))}. Drug names must match the
+\code{name} parameter from \code{define_regimen()}.
+}
+When active, adds \code{{Drug}_pre_sharing_admin_cost} diagnostic columns
+showing original admin costs before sharing adjustment.}
 }
 \value{
-A data.frame. If \code{daily_detail = FALSE} (default): one row
-per model cycle with aggregated costs. If \code{daily_detail = TRUE}:
-one row per day with event flags and costs.
+See description.
 }
 \description{
-Calculate medication costs cycle-by-cycle for a Markov model
+Accepts one or more \code{med_regimen} objects. When a single regimen is
+supplied the return value is identical to the previous API (a data.frame).
+When multiple regimens are supplied and \code{daily_detail = FALSE}, the
+result is a wide-format data.frame with per-drug columns
+(\code{{Name}_drug_cost}, \code{{Name}_admin_cost},
+\code{{Name}_total_cost}) plus a combined \code{total_cost}. When multiple
+regimens are supplied with \code{daily_detail = TRUE}, the result is a
+named list of per-drug daily data.frames.
 }

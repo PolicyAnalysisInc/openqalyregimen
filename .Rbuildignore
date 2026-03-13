@@ -13,3 +13,7 @@ env.RData
 ^docs$
 ^pkgdown$
 ^\.github$
+^scratch$
+^vignettes/.*\.png$
+^vignettes/.*\.html$
+^vignettes/.*\.md$

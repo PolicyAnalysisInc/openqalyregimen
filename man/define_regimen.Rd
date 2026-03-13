@@ -6,15 +6,17 @@
 \usage{
 define_regimen(
   name = "Drug A",
-  route = c("iv", "oral"),
+  route = c("iv", "oral", "sc", "im"),
   dose_per_admin = 100,
   dose_basis = c("flat", "weight", "bsa"),
   patient_weight = 70,
   patient_bsa = 1.8,
+  patient_weight_sd = NULL,
+  patient_bsa_sd = NULL,
   med_cycle_length = 21,
-  n_admin_per_cycle = 1,
-  admin_days = NULL,
+  admin_days,
   max_med_cycles = Inf,
+  start_day = 0,
   unit_cost = NULL,
   units_per_pack = 1,
   tablet_strength = NULL,
@@ -31,7 +33,8 @@ define_regimen(
 \arguments{
 \item{name}{Character. Drug name (for labelling).}
 
-\item{route}{"iv" or "oral".}
+\item{route}{"iv", "oral", "sc" (subcutaneous), or "im"
+(intramuscular).}
 
 \item{dose_per_admin}{Numeric. Dose per administration in mg (flat dose)
 or mg/kg or mg/m² depending on \code{dose_basis}.}
@@ -44,18 +47,28 @@ or mg/kg or mg/m² depending on \code{dose_basis}.}
 \item{patient_bsa}{Numeric. Patient BSA in m² (used if dose_basis
 = "bsa").}
 
+\item{patient_weight_sd}{Numeric or NULL. Standard deviation of patient
+weight (kg). If provided with dose_basis = "weight",
+enables distribution-averaged cost calculation.}
+
+\item{patient_bsa_sd}{Numeric or NULL. Standard deviation of patient BSA
+(m²). If provided with dose_basis = "bsa", enables
+distribution-averaged cost calculation.}
+
 \item{med_cycle_length}{Numeric. Length of one \emph{medication} cycle in days.
 This may differ from the model cycle length.}
 
-\item{n_admin_per_cycle}{Integer. Number of administrations per medication
-cycle. Ignored if \code{admin_days} is specified.}
-
 \item{admin_days}{Integer vector. Explicit days within the medication
 cycle on which administration occurs (1-indexed).
-Overrides \code{n_admin_per_cycle} if supplied.}
+This argument is required.}
 
 \item{max_med_cycles}{Numeric or Inf. Maximum number of medication cycles
 (i.e. treatment duration cap). Inf = no cap.}
+
+\item{start_day}{Numeric. Day on which this regimen's treatment
+begins (default 0). Shifts all treatment events by
+this offset on the shared model timeline. Useful for
+chaining regimen objects (e.g. loading + maintenance).}
 
 \item{unit_cost}{Numeric. Cost per tablet (oral) or per vial (IV).}
 

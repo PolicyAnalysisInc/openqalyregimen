@@ -16,11 +16,17 @@ URL: https://github.com/PolicyAnalysisInc/openqalyregimen,
     https://policyanalysisinc.github.io/openqalyregimen
 BugReports: https://github.com/PolicyAnalysisInc/openqalyregimen/issues
 Imports:
-    magrittr
+    magrittr,
+    Rcpp
+LinkingTo: Rcpp
 Suggests:
+    dplyr,
+    tibble,
+    openqaly,
     testthat (>= 3.0.0),
     roxytest,
     covr,
+    flextable,
     knitr,
     rmarkdown
 Config/testthat/edition: 3

@@ -13,14 +13,14 @@ cost_iv_single(dose_mg, vial_sizes, vial_costs, wastage_threshold = 0)
 
 \item{vial_costs}{Numeric vector of corresponding vial costs.}
 
-\item{wastage_threshold}{Fraction 0-1.  If residual / vial size <= this,
-round down (skip that vial).}
+\item{wastage_threshold}{Fraction 0-1.  If the fraction of the marginal
+vial used is <= this, skip that vial.}
 }
 \value{
 List with drug_cost, n_vials (named vector), waste_mg.
 }
 \description{
-Handles multiple vial sizes, greedy packing, and a wastage threshold that
-controls whether the final (partially-used) vial is opened.
+Finds the minimum-cost combination of vials that covers the required dose,
+using dynamic programming (optimal covering formulation).
 }
 \keyword{internal}
