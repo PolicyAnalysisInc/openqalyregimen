@@ -286,6 +286,7 @@ reg_simple <- define_regimen(
   route = "oral",
   cost_per_day = 5.00,
   admin_cost = 21,
+  admin_days = 1:21,
   med_cycle_length = 21
 )
 

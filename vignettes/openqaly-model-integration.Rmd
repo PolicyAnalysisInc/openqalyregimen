@@ -12,7 +12,11 @@ knitr::opts_chunk$set(
   collapse = TRUE,
   comment = "#>"
 )
-library(openqaly)
+openqaly_available <- requireNamespace("openqaly", quietly = TRUE)
+knitr::opts_chunk$set(eval = openqaly_available)
+if (openqaly_available) {
+  library(openqaly)
+}
 library(openqalyregimen)
 library(dplyr)
 library(tibble)
