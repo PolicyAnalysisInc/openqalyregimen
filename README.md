@@ -6,9 +6,9 @@
 <!-- badges: start -->
 
 [![CircleCI build
-status](https://circleci.com/gh/PolicyAnalysisInc/openqalyregimen.svg?style=svg)](https://circleci.com/gh/PolicyAnalysisInc/openqalyregimen)
+status](https://circleci.com/gh/PolicyAnalysisInc/openqalyregimen.svg?style=svg)](https://app.circleci.com/pipelines/github/PolicyAnalysisInc/openqalyregimen)
 [![Codecov test
-coverage](https://codecov.io/gh/PolicyAnalysisInc/openqalyregimen/branch/master/graph/badge.svg)](https://codecov.io/gh/PolicyAnalysisInc/openqalyregimen?branch=master)
+coverage](https://codecov.io/gh/PolicyAnalysisInc/openqalyregimen/branch/master/graph/badge.svg)](https://app.codecov.io/gh/PolicyAnalysisInc/openqalyregimen?branch=master)
 <!-- badges: end -->
 
 ## Overview
