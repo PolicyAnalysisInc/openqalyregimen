@@ -28,5 +28,7 @@ Suggests:
     flextable,
     knitr,
     rmarkdown
+Remotes:
+    PolicyAnalysisInc/openqaly
 Config/testthat/edition: 3
 VignetteBuilder: knitr
