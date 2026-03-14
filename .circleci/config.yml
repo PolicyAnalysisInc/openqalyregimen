@@ -5,6 +5,7 @@ jobs:
         - image: rocker/verse:latest
       environment:
         R_LIBS: ~/R/Library
+        _R_CHECK_FORCE_SUGGESTS_: "false"
       steps:
         - restore_cache:
             keys:
@@ -42,6 +43,7 @@ jobs:
       - image: rocker/verse:latest
     environment:
       R_LIBS: ~/R/Library
+      _R_CHECK_FORCE_SUGGESTS_: "false"
     steps:
       - restore_cache:
           keys:
