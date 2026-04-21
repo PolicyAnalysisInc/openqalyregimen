@@ -1,14 +1,16 @@
 Package: openqalyregimen
 Title: Treatment Regimen Definitions for CE Models
 Version: 0.0.0.9000
-Authors@R:
+Authors@R: c(
     person(given = "Jordan",
            family = "Amdahl",
            role = c("aut", "cre"),
-           email = "jamdahl@pai2.com")
+           email = "jamdahl@pai2.com"),
+    person("Avalere Health", role = "cph")
+  )
 Maintainer: Jordan Amdahl <jamdahl@pai2.com>
 Description: Provides functions for defining treatment regimens for use in cost-effectiveness models.
-License: MIT + file LICENSE
+License: GPL-3
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE, roclets = c("namespace", "rd", "roxytest::testthat_roclet"))
 RoxygenNote: 7.3.3
