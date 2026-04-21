@@ -428,3 +428,65 @@ test_that("regimen helpers support correct value and summary patterns in openqal
   expect_equal(totals_comparison$raw_amount, totals_comparison$tabular_amount)
   expect_equal(breakdown_comparison$raw_amount, breakdown_comparison$tabular_amount)
 })
+
+test_that("calculate_regimen_cost with time param works in tunnel state model", {
+  skip_if_not_installed("openqaly")
+
+  tbl <- data.frame(
+    name = "Drug A",
+    route = "iv",
+    dose = 100,
+    dose_basis = "flat",
+    med_cycle_length = 7,
+    admin_days = "1",
+    vial_size = 100,
+    vial_cost = 500,
+    admin_cost = 25,
+    stringsAsFactors = FALSE
+  )
+
+  n_cycles <- 4
+  state_cycle_limit <- 3
+
+  model <- openqaly::define_model("markov") |>
+    openqaly::set_settings(
+      n_cycles = n_cycles,
+      cycle_length = 7,
+      cycle_length_unit = "days"
+    ) |>
+    openqaly::add_strategy("treat", "Treatment") |>
+    openqaly::add_state("alive", initial_prob = 1,
+                        state_cycle_limit = state_cycle_limit) |>
+    openqaly::add_state("dead", initial_prob = 0) |>
+    openqaly::add_transition("alive", "dead", 0.1) |>
+    openqaly::add_transition("alive", "alive", C) |>
+    openqaly::add_transition("dead", "dead", 1) |>
+    openqaly::add_table("drug_tbl", tbl) |>
+    openqaly::add_variable(
+      "drug_regimen",
+      define_regimen_table(drug_tbl)
+    ) |>
+    openqaly::add_variable(
+      "c_drug",
+      calculate_regimen_cost(
+        drug_regimen,
+        type = "medication",
+        model_cycle_length = cycle_length_days,
+        n_cycles = max(cycle),
+        time = day
+      )
+    ) |>
+    openqaly::add_value("drug_cost", c_drug, state = "alive", type = "cost") |>
+    openqaly::add_summary("total_cost", "drug_cost", type = "cost")
+
+  results <- openqaly::run_model(model)
+  totals <- openqaly::get_summaries(
+    results,
+    summaries = "total_cost",
+    discounted = FALSE,
+    use_display_names = FALSE
+  )
+
+  expect_true(nrow(totals) > 0)
+  expect_true(all(totals$amount >= 0))
+})

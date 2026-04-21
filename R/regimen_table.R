@@ -57,8 +57,17 @@ define_regimen_table <- function(x, shared_admin = NULL, ...) {
 #' @param shared_admin Optional override for combination admin sharing.
 #' @param subcycle_precision Logical. Passed to \code{calculate_med_costs()}.
 #' @param simple_daily_cost Logical. Passed to \code{calculate_med_costs()}.
+#' @param time Optional numeric vector of day values used to expand the
+#'   cost vector. When supplied, day values are converted to cycle indices
+#'   via \code{round(time / model_cycle_length)} and the returned vector
+#'   has \code{length(time)} elements obtained by indexing into the
+#'   per-cycle cost vector. Indices outside the valid range (less than 1
+#'   or greater than \code{n_cycles}) are mapped to zero. This is useful
+#'   when a model namespace has more rows than cycles (e.g. tunnel states)
+#'   and the cost vector must match \code{nrow(ns$df)}.
 #'
-#' @return Numeric vector of cost by cycle.
+#' @return Numeric vector of cost by cycle when \code{time} is \code{NULL},
+#'   or a vector of \code{length(time)} when \code{time} is supplied.
 #' @export
 calculate_regimen_cost <- function(
     x,
@@ -68,7 +77,8 @@ calculate_regimen_cost <- function(
     cycle_times = NULL,
     shared_admin = NULL,
     subcycle_precision = FALSE,
-    simple_daily_cost = FALSE
+    simple_daily_cost = FALSE,
+    time = NULL
 ) {
     type <- match.arg(type)
 
@@ -102,22 +112,32 @@ calculate_regimen_cost <- function(
     )
 
     if (type == "total") {
-        return(costs$total_cost)
-    }
-    if (type == "medication") {
+        cost_vector <- costs$total_cost
+    } else if (type == "medication") {
         if ("drug_cost" %in% names(costs)) {
-            return(costs$drug_cost)
+            cost_vector <- costs$drug_cost
+        } else {
+            drug_cols <- grep("_drug_cost$", names(costs), value = TRUE)
+            cost_vector <- rowSums(costs[, drug_cols, drop = FALSE])
         }
-        drug_cols <- grep("_drug_cost$", names(costs), value = TRUE)
-        return(rowSums(costs[, drug_cols, drop = FALSE]))
+    } else {
+        if ("admin_cost" %in% names(costs)) {
+            cost_vector <- costs$admin_cost
+        } else {
+            admin_cols <- grep("_admin_cost$", names(costs), value = TRUE)
+            admin_cols <- admin_cols[!grepl("_pre_sharing_admin_cost$", admin_cols)]
+            cost_vector <- rowSums(costs[, admin_cols, drop = FALSE])
+        }
     }
 
-    if ("admin_cost" %in% names(costs)) {
-        return(costs$admin_cost)
+    if (!is.null(time)) {
+        time_idx <- as.integer(round(as.numeric(time) / model_cycle_length))
+        expanded <- numeric(length(time_idx))
+        valid <- time_idx >= 1L & time_idx <= length(cost_vector)
+        expanded[valid] <- cost_vector[time_idx[valid]]
+        return(expanded)
     }
-    admin_cols <- grep("_admin_cost$", names(costs), value = TRUE)
-    admin_cols <- admin_cols[!grepl("_pre_sharing_admin_cost$", admin_cols)]
-    rowSums(costs[, admin_cols, drop = FALSE])
+    cost_vector
 }
 
 #' @export

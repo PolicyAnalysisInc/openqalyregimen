@@ -12,7 +12,8 @@ calculate_regimen_cost(
   cycle_times = NULL,
   shared_admin = NULL,
   subcycle_precision = FALSE,
-  simple_daily_cost = FALSE
+  simple_daily_cost = FALSE,
+  time = NULL
 )
 }
 \arguments{
@@ -32,9 +33,19 @@ calculate_regimen_cost(
 \item{subcycle_precision}{Logical. Passed to \code{calculate_med_costs()}.}
 
 \item{simple_daily_cost}{Logical. Passed to \code{calculate_med_costs()}.}
+
+\item{time}{Optional numeric vector of day values used to expand the
+cost vector. When supplied, day values are converted to cycle indices
+via \code{round(time / model_cycle_length)} and the returned vector
+has \code{length(time)} elements obtained by indexing into the
+per-cycle cost vector. Indices outside the valid range (less than 1
+or greater than \code{n_cycles}) are mapped to zero. This is useful
+when a model namespace has more rows than cycles (e.g. tunnel states)
+and the cost vector must match \code{nrow(ns$df)}.}
 }
 \value{
-Numeric vector of cost by cycle.
+Numeric vector of cost by cycle when \code{time} is \code{NULL},
+or a vector of \code{length(time)} when \code{time} is supplied.
 }
 \description{
 Calculates a cycle-aligned cost vector from a regimen object for use in an
