@@ -5,10 +5,10 @@ Authors@R: c(
     person(given = "Jordan",
            family = "Amdahl",
            role = c("aut", "cre"),
-           email = "jamdahl@pai2.com"),
+           email = "jordan.amdahl@avalerehealth.com"),
     person("Avalere Health", role = "cph")
   )
-Maintainer: Jordan Amdahl <jamdahl@pai2.com>
+Maintainer: Jordan Amdahl <jordan.amdahl@avalerehealth.com>
 Description: Provides functions for defining treatment regimens for use in cost-effectiveness models.
 License: GPL-3
 Encoding: UTF-8
