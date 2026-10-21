@@ -62,12 +62,22 @@ Patient-level dosing inputs stay outside the regimen tables:
 - `patient_bsa`
 - `patient_weight`
 
+`openqalyregimen` functions are not visible inside `openqaly` model formulas
+unless the model loads the package. The shared model therefore includes a
+model script that calls `library(openqalyregimen)`, which is added with
+`add_script()`.
+
 ```{r base-model}
 base_model <- define_model("markov") |>
   set_settings(
     n_cycles = 8,
     cycle_length = 21,
     cycle_length_unit = "days"
+  ) |>
+  add_script(
+    "load_openqalyregimen",
+    "library(openqalyregimen)",
+    description = "Loads openqalyregimen so its functions can be used in variables."
   ) |>
   add_strategy("oral_mono", "Oral Monotherapy") |>
   add_strategy("iv_combo", "IV Combination") |>
