@@ -8,8 +8,7 @@ detail_schedule(
   regimen,
   model_cycle_length = 7,
   n_cycles = 52,
-  cycle_times = NULL,
-  simple_daily_cost = FALSE
+  cycle_times = NULL
 )
 }
 \arguments{
@@ -20,15 +19,19 @@ detail_schedule(
 \item{n_cycles}{Integer. Number of model cycles.}
 
 \item{cycle_times}{Numeric vector. Custom cycle start times.}
-
-\item{simple_daily_cost}{Logical. If TRUE (and regimen has cost_per_day),
-produces one row per day with flat daily costs.}
 }
 \value{
-A data.frame with one row per event (dispensing or administration).
+A data.frame with one row per event: \code{"dispensing"} (day 1 of
+each medication cycle, when drug is costed per dispensing or a
+dispensing fee applies) or \code{"administration"}. \code{day} is the
+event's exact time (it may be fractional, e.g. with a fractional
+\code{start_day}); \code{model_cycle} is the model cycle containing it.
+Events before the first model cycle are left out, as in
+\code{calculate_med_costs()}.
 }
 \description{
 Shows every dispensing and administration event, which medication cycle
-and model cycle it falls in, and the associated cost. This is the
-"unrolled" view before aggregation to model cycles.
+and model cycle it falls in, and the associated costs. This is the
+"unrolled" view before aggregation to model cycles. Costs follow the same
+rules as \code{calculate_med_costs()}.
 }

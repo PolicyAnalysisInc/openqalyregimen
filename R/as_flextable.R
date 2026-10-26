@@ -20,24 +20,19 @@ regimen_col_labels <- function(col_names) {
         cycle_start_day = "Start Day",
         cycle_end_day   = "End Day",
         n_administrations    = "N Admins",
-        n_dispensing_events  = "N Dispensing",
-        n_tablets_dispensed  = "N Tablets",
+        n_dispensings        = "N Dispensing",
         drug_cost       = "Drug Cost",
         admin_cost      = "Admin Cost",
+        dispensing_cost = "Dispensing Cost",
         total_cost      = "Total Cost",
         day             = "Day",
         model_cycle     = "Model Cycle",
         med_cycle       = "Med Cycle",
         med_cycle_day   = "Cycle Day",
         doses_taken     = "Doses",
-        tabs_taken      = "Tabs",
-        mg_taken        = "mg",
-        mg_from_vials   = "mg Vials",
-        mg_wasted       = "mg Waste",
-        vials_used      = "Vials",
-        doses_dispensed = "Doses",
-        tabs_dispensed  = "Tabs",
-        mg_dispensed    = "mg",
+        mg_taken        = "mg Given",
+        units_dispensed = "Units",
+        mg_dispensed    = "mg Dispensed",
         event_type      = "Event Type",
         # dosing diagnostics
         bin                = "Bin",
@@ -49,15 +44,19 @@ regimen_col_labels <- function(col_names) {
         dose_lo            = "Dose Lo",
         dose_hi            = "Dose Hi",
         dose_range         = "Dose Range (mg)",
-        n_vials            = "N Vials",
-        total_vial_mg      = "Total Vial (mg)",
-        waste_mg_lo        = "Waste Lo (mg)",
-        waste_mg_hi        = "Waste Hi (mg)",
-        waste_mg           = "Waste (mg)",
-        packing            = "Vial Combination",
+        n_units            = "N Units",
+        total_unit_mg      = "Drug in Units (mg)",
+        leftover_mg_lo     = "Left Over Lo (mg)",
+        leftover_mg_hi     = "Left Over Hi (mg)",
+        leftover_mg        = "Left Over (mg)",
+        shortfall_mg_lo    = "Rounded Down Lo (mg)",
+        shortfall_mg_hi    = "Rounded Down Hi (mg)",
+        shortfall_mg       = "Rounded Down (mg)",
+        packing            = "Unit Combination",
         cost               = "Drug Cost",
         weighted_cost      = "Weighted Cost",
-        pre_sharing_admin_cost = "Admin (Pre-Share)"
+        pre_sharing_admin_cost = "Admin (Pre-Share)",
+        pre_sharing_dispensing_cost = "Dispensing (Pre-Share)"
     )
     labels <- label_map[col_names]
     labels[is.na(labels)] <- col_names[is.na(labels)]
@@ -116,6 +115,20 @@ format_logical_cols <- function(df) {
     df
 }
 
+# Column type of a per-drug combination column ("Drug_A_admin_cost" ->
+# "admin_cost"), read from its known ending (longest first, so e.g.
+# "pre_sharing_admin_cost" wins over "admin_cost").
+drug_column_suffix <- function(col) {
+    known <- c("pre_sharing_dispensing_cost", "pre_sharing_admin_cost",
+               "units_dispensed", "dispensing_cost", "med_cycle_day",
+               "mg_dispensed", "doses_taken", "admin_cost", "total_cost",
+               "drug_cost", "med_cycle", "mg_taken")
+    for (k in known) {
+        if (endsWith(col, paste0("_", k))) return(k)
+    }
+    col
+}
+
 # Identify cost/int/mg columns from a set of column names
 classify_columns <- function(col_names) {
     cost_cols <- col_names[grepl("_cost$", col_names)]
@@ -123,15 +136,12 @@ classify_columns <- function(col_names) {
     if ("cost" %in% col_names) cost_cols <- union(cost_cols, "cost")
     int_cols <- intersect(col_names, c(
         "cycle", "day", "model_cycle", "med_cycle", "med_cycle_day",
-        "n_administrations", "n_dispensing_events", "n_tablets_dispensed",
-        "doses_taken", "vials_used", "tabs_taken", "doses_dispensed",
-        "tabs_dispensed", "n_vials", "bin"
+        "n_administrations", "n_dispensings", "doses_taken",
+        "units_dispensed", "n_units", "bin"
     ))
     mg_cols <- intersect(col_names, c(
-        "mg_taken", "mg_from_vials", "mg_wasted", "mg_dispensed",
-        "waste_mg", "waste_mg_lo", "waste_mg_hi",
-        "mg_administered", "mg_administered_lo", "mg_administered_hi",
-        "total_vial_mg"
+        "mg_taken", "mg_dispensed", "leftover_mg_lo", "leftover_mg_hi",
+        "shortfall_mg_lo", "shortfall_mg_hi", "total_unit_mg"
     ))
     list(cost = cost_cols, int = int_cols, mg = mg_cols)
 }
@@ -188,17 +198,11 @@ as_flextable.combo_regimen_costs <- function(x, ...) {
     )
     bottom_row <- top_row
 
+    drug_columns <- attr(x, "drug_columns")
     for (drug in drug_names) {
-        nm <- gsub("[^a-zA-Z0-9]", "_", drug)
-        drug_prefix <- paste0(nm, "_")
-        drug_cols <- col_names[startsWith(col_names, drug_prefix)]
-        drug_cols <- setdiff(drug_cols, c(shared_cols, combined_col))
-        for (dc in drug_cols) {
-            if (dc %in% col_names) {
-                top_row[[dc]] <- drug
-                suffix <- sub(paste0("^", nm, "_"), "", dc)
-                bottom_row[[dc]] <- regimen_col_labels(suffix)
-            }
+        for (dc in intersect(drug_columns[[drug]], col_names)) {
+            top_row[[dc]] <- drug
+            bottom_row[[dc]] <- regimen_col_labels(drug_column_suffix(dc))
         }
     }
 
@@ -225,10 +229,7 @@ as_flextable.combo_regimen_costs <- function(x, ...) {
     }
 
     for (drug in drug_names) {
-        nm <- gsub("[^a-zA-Z0-9]", "_", drug)
-        drug_prefix <- paste0(nm, "_")
-        drug_cols <- col_names[startsWith(col_names, drug_prefix)]
-        drug_cols <- setdiff(drug_cols, c(shared_cols, combined_col))
+        drug_cols <- intersect(drug_columns[[drug]], col_names)
         if (length(drug_cols) > 1) {
             ft <- flextable::merge_at(
                 ft, i = 1, j = which(col_names %in% drug_cols),
@@ -259,52 +260,18 @@ as_flextable.regimen_daily_detail <- function(x, ...) {
     df <- format_logical_cols(df)
     col_names <- names(df)
 
-    is_iv <- "vials_used" %in% col_names
-    is_oral_wastage <- "doses_dispensed" %in% col_names
-
     standalone_cols <- c("day", "model_cycle")
     med_cycle_cols <- c("med_cycle", "med_cycle_day")
     cost_cols_group <- intersect(
-        c("drug_cost", "admin_cost", "total_cost"), col_names
+        c("drug_cost", "admin_cost", "dispensing_cost", "total_cost"), col_names
     )
-
-    if (is_iv) {
-        dosing_cols <- intersect(
-            c("doses_taken", "mg_taken", "mg_from_vials",
-              "mg_wasted", "vials_used"),
-            col_names
-        )
-        group_spec <- list(
-            "Medication Cycle" = med_cycle_cols,
-            "Dosing Detail" = dosing_cols,
-            "Costs" = cost_cols_group
-        )
-    } else if (is_oral_wastage) {
-        taken_cols <- intersect(
-            c("doses_taken", "tabs_taken", "mg_taken"),
-            col_names
-        )
-        dispensed_cols <- intersect(
-            c("doses_dispensed", "tabs_dispensed", "mg_dispensed"),
-            col_names
-        )
-        group_spec <- list(
-            "Medication Cycle" = med_cycle_cols,
-            "Taken" = taken_cols,
-            "Dispensed" = dispensed_cols,
-            "Costs" = cost_cols_group
-        )
-    } else {
-        dosing_cols <- intersect(
-            c("doses_taken", "mg_taken"),
-            col_names
-        )
-        group_spec <- list(
-            "Medication Cycle" = med_cycle_cols,
-            "Dosing Detail" = dosing_cols,
-            "Costs" = cost_cols_group
-        )
-    }
+    group_spec <- list(
+        "Medication Cycle" = med_cycle_cols,
+        "Given" = intersect(c("doses_taken", "mg_taken"), col_names),
+        "Dispensed" = intersect(c("units_dispensed", "mg_dispensed"), col_names),
+        "Costs" = cost_cols_group
+    )
+    group_spec <- group_spec[lengths(group_spec) > 0]
 
     top_row <- stats::setNames(vector("list", length(col_names)), col_names)
     bottom_row <- stats::setNames(vector("list", length(col_names)), col_names)
@@ -384,14 +351,9 @@ as_flextable.combo_regimen_daily_detail <- function(x, ...) {
     bottom_row[[combined_col]] <- "Combined Total Cost"
 
     for (drug in drug_names) {
-        cols <- drug_columns[[drug]]
-        nm <- gsub("[^a-zA-Z0-9]", "_", drug)
-        for (col in cols) {
-            if (col %in% col_names) {
-                top_row[[col]] <- drug
-                raw_name <- sub(paste0("^", nm, "_"), "", col)
-                bottom_row[[col]] <- regimen_col_labels(raw_name)
-            }
+        for (col in intersect(drug_columns[[drug]], col_names)) {
+            top_row[[col]] <- drug
+            bottom_row[[col]] <- regimen_col_labels(drug_column_suffix(col))
         }
     }
 
@@ -438,13 +400,12 @@ as_flextable.combo_regimen_daily_detail <- function(x, ...) {
 as_flextable.regimen_schedule <- function(x, ...) {
     check_flextable_installed()
     df <- as.data.frame(x)
-    df$event_type <- NULL
     col_names <- names(df)
 
-    standalone_cols <- c("day", "model_cycle")
+    standalone_cols <- c("day", "model_cycle", "event_type")
     med_cycle_cols <- c("med_cycle", "med_cycle_day")
     cost_cols_group <- intersect(
-        c("drug_cost", "admin_cost", "total_cost"), col_names
+        c("drug_cost", "admin_cost", "dispensing_cost", "total_cost"), col_names
     )
 
     top_row <- stats::setNames(vector("list", length(col_names)), col_names)
@@ -516,18 +477,26 @@ as_flextable.dosing_detail <- function(x, ...) {
     # Build display data frame: merge lo/hi pairs into range strings
     param_digits <- if (dose_basis == "weight") 1 else 2
     fmt_param <- function(v) formatC(v, format = "f", digits = param_digits)
-    fmt_dose  <- function(v) formatC(v, format = "f", digits = 1)
-    fmt_mg    <- function(v) formatC(v, format = "f", digits = 1)
+    # 4 significant digits, so small amounts (0.026 mg) aren't shown as 0
+    fmt_dose  <- function(v) format_mg(signif(v, 4))
+    fmt_mg    <- fmt_dose
 
     param_range <- paste0(fmt_param(x$param_lo), " \u2013 ",
                           fmt_param(x$param_hi))
     dose_range  <- paste0(fmt_dose(x$dose_lo), " \u2013 ",
                           fmt_dose(x$dose_hi))
-    waste_range <- ifelse(
-        x$waste_mg_lo == x$waste_mg_hi,
-        fmt_mg(x$waste_mg_lo),
-        paste0(fmt_mg(x$waste_mg_lo), " \u2013 ",
-               fmt_mg(x$waste_mg_hi))
+    leftover_range <- ifelse(
+        x$leftover_mg_lo == x$leftover_mg_hi,
+        fmt_mg(x$leftover_mg_lo),
+        paste0(fmt_mg(x$leftover_mg_lo), " \u2013 ",
+               fmt_mg(x$leftover_mg_hi))
+    )
+
+    shortfall_range <- ifelse(
+        x$shortfall_mg_lo == x$shortfall_mg_hi,
+        fmt_mg(x$shortfall_mg_lo),
+        paste0(fmt_mg(x$shortfall_mg_lo), " \u2013 ",
+               fmt_mg(x$shortfall_mg_hi))
     )
 
     df <- data.frame(
@@ -537,9 +506,10 @@ as_flextable.dosing_detail <- function(x, ...) {
         dose_per_admin = x$dose_per_admin,
         dose_range     = dose_range,
         packing        = x$packing,
-        n_vials        = x$n_vials,
-        total_vial_mg  = x$total_vial_mg,
-        waste_mg       = waste_range,
+        n_units        = x$n_units,
+        total_unit_mg  = fmt_mg(x$total_unit_mg),
+        leftover_mg    = leftover_range,
+        shortfall_mg   = shortfall_range,
         cost           = x$cost,
         weighted_cost  = x$weighted_cost,
         stringsAsFactors = FALSE
@@ -548,12 +518,12 @@ as_flextable.dosing_detail <- function(x, ...) {
 
     standalone_cols <- c("bin", "probability", "param_range",
                          "dose_per_admin", "dose_range",
-                         "total_vial_mg", "waste_mg")
-    packing_cols    <- intersect(c("packing", "n_vials"), col_names)
+                         "total_unit_mg", "leftover_mg", "shortfall_mg")
+    packing_cols    <- intersect(c("packing", "n_units"), col_names)
     cost_cols_group <- intersect(c("cost", "weighted_cost"), col_names)
 
     group_spec <- list()
-    group_spec[["Vial Packing"]] <- packing_cols
+    group_spec[["Units"]] <- packing_cols
     group_spec[["Cost"]] <- cost_cols_group
 
     top_row    <- stats::setNames(vector("list", length(col_names)), col_names)
@@ -619,7 +589,18 @@ as_flextable.dosing_detail <- function(x, ...) {
         " (", round(mean_param, 2), " \u00B1 ", round(sd_param, 2),
         " ", param_unit, ")"
     )
-    ft <- flextable::add_footer_lines(ft, values = footer_text)
+    unit_sizes <- attr(x, "unit_size")
+    unit_costs <- attr(x, "unit_cost")
+    ord <- order(unit_sizes, decreasing = TRUE)
+    units_text <- paste0(
+        "Units: ",
+        paste0(format_mg(unit_sizes[ord]), "mg @ $",
+               formatC(unit_costs[ord], format = "f", digits = 2,
+                       big.mark = ","), collapse = ", "),
+        " | Max dose rounding: ", attr(x, "max_dose_rounding") * 100,
+        "% of the prescribed dose"
+    )
+    ft <- flextable::add_footer_lines(ft, values = c(footer_text, units_text))
 
     ft <- flextable::align(ft, align = "center", part = "header")
 
@@ -630,107 +611,6 @@ as_flextable.dosing_detail <- function(x, ...) {
     ft <- flextable::colformat_double(ft, j = "probability", digits = 4)
     # Format dose_per_admin
     ft <- flextable::colformat_double(ft, j = "dose_per_admin", digits = 2)
-    # Format total_vial_mg
-    ft <- flextable::colformat_double(ft, j = "total_vial_mg", digits = 1)
-
-    ft
-}
-
-
-# ── Method 6b: vial_packing_detail (backward compat) ────────────────────────
-
-#' Convert vial_packing_detail to flextable
-#'
-#' @param x A \code{vial_packing_detail} object.
-#' @param ... Additional arguments (unused).
-#' @return A flextable object with two-row grouped header and summary footer.
-#' @exportS3Method flextable::as_flextable
-as_flextable.vial_packing_detail <- function(x, ...) {
-    check_flextable_installed()
-    df <- as.data.frame(x)
-    col_names <- names(df)
-
-    standalone_cols <- "bin"
-    dose_cols       <- c("dose_lo", "dose_hi")
-    packing_cols    <- intersect(c("n_vials", "waste_mg", "packing"), col_names)
-    cost_cols_group <- intersect(c("cost", "probability", "weighted_cost"),
-                                 col_names)
-
-    group_spec <- list(
-        "Dose Range"            = dose_cols,
-        "Packing"               = packing_cols,
-        "Cost"                  = cost_cols_group
-    )
-
-    top_row    <- stats::setNames(vector("list", length(col_names)), col_names)
-    bottom_row <- stats::setNames(vector("list", length(col_names)), col_names)
-
-    for (sc in standalone_cols) {
-        top_row[[sc]]    <- regimen_col_labels(sc)
-        bottom_row[[sc]] <- regimen_col_labels(sc)
-    }
-
-    for (group_name in names(group_spec)) {
-        cols <- group_spec[[group_name]]
-        for (col in cols) {
-            top_row[[col]]    <- group_name
-            bottom_row[[col]] <- regimen_col_labels(col)
-        }
-    }
-
-    header_df <- data.frame(
-        col_keys = col_names,
-        top      = unlist(top_row[col_names]),
-        bottom   = unlist(bottom_row[col_names]),
-        stringsAsFactors = FALSE
-    )
-
-    ft <- flextable::flextable(df)
-    ft <- flextable::set_header_df(ft, mapping = header_df, key = "col_keys")
-
-    for (sc in standalone_cols) {
-        ft <- flextable::merge_v(ft, j = sc, part = "header")
-    }
-
-    for (group_name in names(group_spec)) {
-        cols <- group_spec[[group_name]]
-        if (length(cols) > 1) {
-            ft <- flextable::merge_at(
-                ft, i = 1, j = which(col_names %in% cols), part = "header"
-            )
-        }
-    }
-
-    # Footer summary
-    drug_name   <- attr(x, "drug_name")
-    dose_basis  <- attr(x, "dose_basis")
-    mean_param  <- attr(x, "mean_param")
-    sd_param    <- attr(x, "sd_param")
-    exp_cost    <- attr(x, "expected_cost")
-
-    basis_unit <- if (dose_basis == "weight") "kg" else "m\u00B2"
-    footer_text <- paste0(
-        "Expected cost: $",
-        formatC(exp_cost, format = "f", digits = 2, big.mark = ","),
-        " | Drug: ", drug_name,
-        " | Dose basis: ", dose_basis,
-        " (", round(mean_param, 2), " \u00B1 ", round(sd_param, 2),
-        " ", basis_unit, ")"
-    )
-    ft <- flextable::add_footer_lines(ft, values = footer_text)
-
-    ft <- flextable::align(ft, align = "center", part = "header")
-
-    cls <- classify_columns(col_names)
-    ft <- theme_regimen(ft, cls$cost, cls$int, cls$mg)
-
-    # Format probability and dose columns
-    for (col in intersect(c("probability"), col_names)) {
-        ft <- flextable::colformat_double(ft, j = col, digits = 4)
-    }
-    for (col in intersect(c("dose_lo", "dose_hi"), col_names)) {
-        ft <- flextable::colformat_double(ft, j = col, digits = 1)
-    }
 
     ft
 }

@@ -6,40 +6,37 @@
 \usage{
 calculate_regimen_cost(
   x,
-  type = c("medication", "administration", "total"),
-  model_cycle_length = cycle_length_days,
-  n_cycles = max(cycle),
+  type = c("medication", "administration", "dispensing", "total"),
+  model_cycle_length,
+  n_cycles,
   cycle_times = NULL,
   shared_admin = NULL,
-  subcycle_precision = FALSE,
-  simple_daily_cost = FALSE,
   time = NULL
 )
 }
 \arguments{
 \item{x}{A \code{med_regimen} or \code{med_regimen_combo}.}
 
-\item{type}{One of \code{"medication"}, \code{"administration"}, or
+\item{type}{One of \code{"medication"} (drug cost), \code{"administration"}
+(\code{admin_cost}), \code{"dispensing"} (\code{dispensing_cost}), or
 \code{"total"}.}
 
-\item{model_cycle_length}{Numeric model cycle length in days.}
+\item{model_cycle_length}{Numeric model cycle length in days. In an
+\code{openqaly} formula, pass \code{cycle_length_days}.}
 
-\item{n_cycles}{Integer number of model cycles.}
+\item{n_cycles}{Integer number of model cycles. In an \code{openqaly}
+formula, pass \code{max(cycle)}.}
 
 \item{cycle_times}{Optional numeric vector of cycle start times.}
 
 \item{shared_admin}{Optional override for combination admin sharing.}
 
-\item{subcycle_precision}{Logical. Passed to \code{calculate_med_costs()}.}
-
-\item{simple_daily_cost}{Logical. Passed to \code{calculate_med_costs()}.}
-
 \item{time}{Optional numeric vector of day values used to expand the
-cost vector. When supplied, day values are converted to cycle indices
-via \code{round(time / model_cycle_length)} and the returned vector
-has \code{length(time)} elements obtained by indexing into the
-per-cycle cost vector. Indices outside the valid range (less than 1
-or greater than \code{n_cycles}) are mapped to zero. This is useful
+cost vector. Each value is the end of a model cycle (as openqaly's
+\code{day} = cycle x cycle length) and is mapped to the cycle whose
+interval (start, end] contains it, using \code{cycle_times} when
+given. The returned vector has \code{length(time)} elements; values
+outside every cycle are mapped to zero. This is useful
 when a model namespace has more rows than cycles (e.g. tunnel states)
 and the cost vector must match \code{nrow(ns$df)}.}
 }

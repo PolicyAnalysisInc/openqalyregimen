@@ -11,9 +11,11 @@ test_that("regimen helpers support correct value and summary patterns in openqal
     med_cycle_length = 21,
     admin_days = "1-14",
     max_cycles = 8,
-    available_strengths = "150,500",
+    unit_size = "150,500",
+    exact = TRUE,
+    charge_timing = "per_dispensing",
     unit_cost = 2.21,
-    admin_cost = 45
+    dispensing_cost = 45
   )
 
   iv_combo_trastuzumab_tbl <- tibble::tibble(
@@ -25,9 +27,11 @@ test_that("regimen helpers support correct value and summary patterns in openqal
     admin_days = c("1", "1"),
     max_cycles = c(1, 7),
     start_day = c(0, 21),
-    vial_sizes = c("150,420", "150,420"),
-    vial_cost = c("407.40,1184", "407.40,1184"),
-    wastage_threshold = c(0.1, 0.1),
+    unit_size = c("150,420", "150,420"),
+    unit_cost = c("407.40,1184", "407.40,1184"),
+    max_dose_rounding = c(0.1, 0.1),
+    exact = c(FALSE, FALSE),
+    charge_timing = c("per_admin", "per_admin"),
     admin_cost = c(241, 241)
   )
 
@@ -39,8 +43,10 @@ test_that("regimen helpers support correct value and summary patterns in openqal
     med_cycle_length = 21,
     admin_days = "1",
     max_cycles = 8,
-    vial_sizes = "420",
-    vial_cost = "2750",
+    unit_size = "420",
+    exact = FALSE,
+    charge_timing = "per_admin",
+    unit_cost = "2750",
     admin_cost = 241
   )
 
@@ -92,9 +98,11 @@ test_that("regimen helpers support correct value and summary patterns in openqal
           med_cycle_length = cycle_length_days,
           admin_days = 1:14,
           max_med_cycles = max(cycle),
-          available_strengths = c(150, 500),
+          unit_size = c(150, 500),
+          exact = TRUE,
+          charge_timing = "per_dispensing",
           unit_cost = 2.21,
-          admin_cost = 45
+          dispensing_cost = 45
         ),
         strategy = "oral_mono"
       ) |>
@@ -110,9 +118,11 @@ test_that("regimen helpers support correct value and summary patterns in openqal
           admin_days = 1,
           max_med_cycles = 1,
           start_day = 0,
-          vial_sizes = c(150, 420),
-          vial_cost = c(407.40, 1184),
-          wastage_threshold = 0.1,
+          unit_size = c(150, 420),
+          unit_cost = c(407.40, 1184),
+          max_dose_rounding = 0.1,
+          exact = FALSE,
+          charge_timing = "per_admin",
           admin_cost = 241
         ),
         strategy = "iv_combo"
@@ -129,9 +139,11 @@ test_that("regimen helpers support correct value and summary patterns in openqal
           admin_days = 1,
           max_med_cycles = max(cycle) - 1,
           start_day = cycle_length_days,
-          vial_sizes = c(150, 420),
-          vial_cost = c(407.40, 1184),
-          wastage_threshold = 0.1,
+          unit_size = c(150, 420),
+          unit_cost = c(407.40, 1184),
+          max_dose_rounding = 0.1,
+          exact = FALSE,
+          charge_timing = "per_admin",
           admin_cost = 241
         ),
         strategy = "iv_combo"
@@ -146,8 +158,10 @@ test_that("regimen helpers support correct value and summary patterns in openqal
           med_cycle_length = cycle_length_days,
           admin_days = 1,
           max_med_cycles = max(cycle),
-          vial_sizes = 420,
-          vial_cost = 2750,
+          unit_size = 420,
+          exact = FALSE,
+          charge_timing = "per_admin",
+          unit_cost = 2750,
           admin_cost = 241
         ),
         strategy = "iv_combo"
@@ -166,7 +180,7 @@ test_that("regimen helpers support correct value and summary patterns in openqal
         "c_capecitabine_admin",
         calculate_regimen_cost(
           capecitabine_regimen,
-          type = "administration",
+          type = "dispensing",
           model_cycle_length = cycle_length_days,
           n_cycles = max(cycle)
         ),
@@ -273,7 +287,7 @@ test_that("regimen helpers support correct value and summary patterns in openqal
         "c_capecitabine_admin",
         calculate_regimen_cost(
           capecitabine_regimen,
-          type = "administration",
+          type = "dispensing",
           model_cycle_length = cycle_length_days,
           n_cycles = max(cycle)
         ),
@@ -439,8 +453,10 @@ test_that("calculate_regimen_cost with time param works in tunnel state model", 
     dose_basis = "flat",
     med_cycle_length = 7,
     admin_days = "1",
-    vial_size = 100,
-    vial_cost = 500,
+    unit_size = 100,
+    unit_cost = 500,
+    exact = FALSE,
+    charge_timing = "per_admin",
     admin_cost = 25,
     stringsAsFactors = FALSE
   )

@@ -1,7 +1,7 @@
-#' Print a summary of a regimen's dispensing and administration structure
+#' Print a summary of a regimen's dosing, units and costs
 #'
-#' Shows how dosing translates to tablets/vials, what constitutes a dispensing
-#' event vs an administration event, and the cost breakdown at each level.
+#' Shows the dose, the units dispensed per administration, how the drug is
+#' costed (timing, rounding, wastage) and the fees.
 #'
 #' @param reg A \code{med_regimen} object.
 #' @return Invisibly returns reg. Called for its side effect (printing).
@@ -10,6 +10,8 @@
 summarise_regimen <- function(reg) {
     stopifnot(inherits(reg, "med_regimen"))
     n_admin_per_cycle <- length(reg$admin_days)
+    dist <- regimen_distribution(reg)
+    has_dist <- !is.null(dist)
 
     divider <- paste0(rep("-", 65), collapse = "")
     cat("\n", divider, "\n", sep = "")
@@ -25,119 +27,87 @@ summarise_regimen <- function(reg) {
         else "", "\n", sep = "")
     if (reg$dose_basis == "weight") {
         cat("  Patient weight:     ", reg$patient_weight, " kg\n", sep = "")
-        if (!is.null(reg$patient_weight_sd)) {
+        if (has_dist) {
             cat("  Weight SD:          ", reg$patient_weight_sd, " kg\n", sep = "")
-            bins <- generate_cost_bins(
-                reg, reg$patient_weight, reg$patient_weight_sd
-            )
-            cat("  Cost-based bins:    ", nrow(bins), "\n", sep = "")
         }
     } else if (reg$dose_basis == "bsa") {
         cat("  Patient BSA:        ", reg$patient_bsa, " m2\n", sep = "")
-        if (!is.null(reg$patient_bsa_sd)) {
+        if (has_dist) {
             cat("  BSA SD:             ", reg$patient_bsa_sd, " m2\n", sep = "")
-            bins <- generate_cost_bins(
-                reg, reg$patient_bsa, reg$patient_bsa_sd
-            )
-            cat("  Cost-based bins:    ", nrow(bins), "\n", sep = "")
         }
     }
-    has_dist <- (!is.null(reg$patient_weight_sd) && reg$dose_basis == "weight") ||
-                (!is.null(reg$patient_bsa_sd) && reg$dose_basis == "bsa")
-    mean_tag <- if (has_dist) " (mean)" else ""
-    cat("  Actual dose:        ", reg$actual_dose_mg, " mg", mean_tag, "\n",
+    mean_tag <- if (has_dist) " (at the mean)" else ""
+    cat("  Dose:               ", reg$actual_dose_mg, " mg", mean_tag, "\n",
         sep = "")
 
-    # ── Tablet / vial breakdown ──────────────────────────────────────────
-    if (reg$route == "oral") {
-        if (!has_dist) {
-            if (!is.null(names(reg$unit_cost))) {
-                res <- cost_oral_single(
-                    reg$actual_dose_mg, reg$available_strengths,
-                    cost_per_strength = reg$unit_cost
-                )
-            } else {
-                res <- cost_oral_single(
-                    reg$actual_dose_mg, reg$available_strengths,
-                    cost_per_tablet = reg$unit_cost
-                )
-            }
-            cat("\n")
-            cat("TABLET BREAKDOWN (per administration)\n")
-            for (i in seq_along(res$tablets)) {
-                if (res$tablets[i] > 0) {
-                    cat("  ", res$tablets[i], " x ",
-                        names(res$tablets)[i], " tablet(s)\n", sep = "")
-                }
-            }
-            dispensed_mg <- sum(
-                res$tablets * reg$available_strengths[
-                    order(reg$available_strengths, decreasing = TRUE)
-                ]
-            )
-            cat("  Tablet mg per admin: ", dispensed_mg, " mg\n", sep = "")
-            if (res$waste_mg > 1e-9) {
-                cat("  Tablet rounding waste: ", round(res$waste_mg, 2),
-                    " mg per admin\n", sep = "")
-            } else {
-                cat("  Tablet rounding waste: none\n")
-            }
-            cat("  Drug cost per admin: $", res$drug_cost, " (point estimate)\n",
-                sep = "")
-            dist_cost <- cost_single_admin_drug(reg)
-            if (dist_cost != res$drug_cost) {
-                cat("  Dist-avg cost/admin: $", round(dist_cost, 4), "\n",
-                    sep = "")
-            }
-        } else {
-            cat("\nCOST (per administration, distribution-averaged)\n")
-            dist_cost <- cost_single_admin_drug(reg)
-            cat("  Drug cost per admin: $", round(dist_cost, 4), "\n", sep = "")
-        }
-
+    # ── Costing ──────────────────────────────────────────────────────────
+    cat("\n")
+    detail <- cost_single_dose(reg$actual_dose_mg, reg)
+    u <- regimen_units(reg)
+    ord <- order(u$sizes, decreasing = TRUE)
+    cat("AVAILABLE UNITS\n")
+    for (k in ord) {
+        cat("  ", format_mg(u$sizes[k]), "mg @ $", u$costs[k], " ($",
+            signif(u$costs[k] / u$sizes[k], 4), "/mg)\n", sep = "")
+    }
+    cat("\n")
+    at_mean <- if (has_dist) ", at the mean" else ""
+    if (reg$no_wastage) {
+        per_mg <- u$costs / u$sizes
+        best <- which.min(per_mg)
+        cat("NO-WASTAGE PRICING (per administration", at_mean, ")\n",
+            sep = "")
+        cat("  Lowest cost per mg: $", signif(per_mg[best], 6), "/mg (",
+            format_mg(u$sizes[best]), "mg unit)\n", sep = "")
+        cat("  Costed dose:        ", detail$prescribed_mg, " mg\n", sep = "")
     } else {
-        if (!has_dist) {
-            # IV/SC/IM point estimate
-            res <- cost_iv_single(
-                reg$actual_dose_mg, reg$vial_sizes, reg$vial_cost,
-                reg$wastage_threshold
-            )
-            cat("\n")
-            cat("VIAL BREAKDOWN (per administration)\n")
-            for (i in seq_along(res$n_vials)) {
-                if (res$n_vials[i] > 0) {
-                    cat("  ", res$n_vials[i], " x ",
-                        names(res$n_vials)[i], " vial(s)\n", sep = "")
-                }
+        cat("UNITS (per administration", at_mean, ")\n", sep = "")
+        for (i in seq_along(detail$units)) {
+            if (detail$units[i] > 0) {
+                cat("  ", detail$units[i], " x ", names(detail$units)[i],
+                    "\n", sep = "")
             }
-            cat("  Drug waste: ", round(res$waste_mg, 2), " mg\n", sep = "")
-            cat("  Wastage threshold: ", reg$wastage_threshold * 100, "%\n",
+        }
+        cat("  Drug in units:      ", detail$dispensed_mg, " mg\n", sep = "")
+        cat("  Dose given:         ", detail$given_mg, " mg\n", sep = "")
+        if (detail$shortfall_mg > 0) {
+            cat("  Rounded down by:    ", detail$shortfall_mg, " mg (",
+                signif(100 * detail$shortfall_mg / detail$prescribed_mg, 3),
+                "% of the prescribed dose)\n", sep = "")
+        }
+        if (detail$leftover_mg > 0) {
+            cat("  Left over:          ", detail$leftover_mg, " mg\n",
                 sep = "")
-            cat("  Drug cost per admin: $", res$drug_cost, " (point estimate)\n",
-                sep = "")
-            dist_cost <- cost_single_admin_drug(reg)
-            if (dist_cost != res$drug_cost) {
-                cat("  Dist-avg cost/admin: $", round(dist_cost, 4), "\n",
-                    sep = "")
-            }
-        } else {
-            cat("\nCOST (per administration, distribution-averaged)\n")
-            dist_cost <- cost_single_admin_drug(reg)
-            cat("  Wastage threshold: ", reg$wastage_threshold * 100, "%\n",
-                sep = "")
-            cat("  Drug cost per admin: $", round(dist_cost, 4), "\n", sep = "")
         }
     }
+    cat("\nCOSTING\n")
+    cat("  Exact dosing:       ", if (reg$exact) "yes" else "no", "\n",
+        sep = "")
+    cat("  Max dose rounding:  ", reg$max_dose_rounding * 100,
+        "% of the prescribed dose\n", sep = "")
+    cat("  No-wastage pricing: ", if (reg$no_wastage) "yes" else "no",
+        "\n", sep = "")
+    cat("  Drug cost per admin: $", round(detail$cost, 4),
+        if (has_dist) " (at the mean)" else "", "\n", sep = "")
+    per_admin <- cost_single_admin_drug(reg)
+    if (has_dist) {
+        cat("  Expected cost per admin: $", round(per_admin, 4), "\n",
+            sep = "")
+    }
+    cat("  Charge timing:      ", reg$charge_timing, "\n", sep = "")
+    cat("  Drug cost per med cycle: $",
+        round(per_admin * n_admin_per_cycle, 4), "\n", sep = "")
+    cat("  Admin cost:         $", reg$admin_cost, " per administration\n",
+        sep = "")
+    cat("  Dispensing cost:    $", reg$dispensing_cost,
+        " per medication cycle\n", sep = "")
 
     # ── Schedule ─────────────────────────────────────────────────────────
     cat("\n")
     cat("MEDICATION CYCLE SCHEDULE\n")
     cat("  Medication cycle length: ", reg$med_cycle_length, " days\n",
         sep = "")
-    cat("  Administrations per cycle: ", n_admin_per_cycle, "\n",
-        sep = "")
-
-    # Compact display of admin days
+    cat("  Administrations per cycle: ", n_admin_per_cycle, "\n", sep = "")
     if (length(reg$admin_days) <= 10) {
         cat("  Administration days: ",
             paste(reg$admin_days, collapse = ", "), "\n", sep = "")
@@ -152,18 +122,14 @@ summarise_regimen <- function(reg) {
                 paste(reg$admin_days, collapse = ", "), "\n", sep = "")
         }
     }
-
     off_days <- setdiff(seq_len(reg$med_cycle_length), reg$admin_days)
     if (length(off_days) > 0) {
         if (length(off_days) <= 10) {
-            cat("  Off days: ",
-                paste(off_days, collapse = ", "), "\n", sep = "")
+            cat("  Off days: ", paste(off_days, collapse = ", "), "\n", sep = "")
         } else {
-            cat("  Off days: ", min(off_days), "-", max(off_days), "\n",
-                sep = "")
+            cat("  Off days: ", min(off_days), "-", max(off_days), "\n", sep = "")
         }
     }
-
     if (is.finite(reg$max_med_cycles)) {
         cat("  Max medication cycles: ", reg$max_med_cycles, "\n", sep = "")
         cat("  Max treatment duration: ",
@@ -174,70 +140,6 @@ summarise_regimen <- function(reg) {
     start_day <- reg$start_day %||% 0
     if (start_day > 0) {
         cat("  Start day: ", start_day, "\n", sep = "")
-        if (is.finite(reg$max_med_cycles)) {
-            treat_end <- start_day + reg$max_med_cycles * reg$med_cycle_length
-            cat("  Treatment window: day ", start_day, " - day ", treat_end,
-                "\n", sep = "")
-        } else {
-            cat("  Treatment window: day ", start_day, " onward\n", sep = "")
-        }
-    }
-
-    # ── Dispensing vs administration ─────────────────────────────────────
-    cat("\n")
-    cat("DISPENSING vs ADMINISTRATION\n")
-
-    if (reg$route == "oral" && reg$oral_wastage) {
-        disp_cost <- cost_oral_cycle_dispensing(reg)
-
-        cat("  Mode: ORAL WASTAGE (dispense full cycle upfront)\n")
-        cat("  Dispensing event (day 1 of each med cycle):\n")
-        if (!has_dist) {
-            tabs_per_admin <- sum(res$tablets)
-            tabs_per_disp  <- tabs_per_admin * n_admin_per_cycle
-            cat("    Tablets dispensed: ", tabs_per_disp, "\n", sep = "")
-        }
-        cat("    Drug cost:        $", disp_cost, "\n", sep = "")
-        if (reg$admin_cost > 0) {
-            cat("    Dispensing cost:  $", reg$admin_cost, "\n", sep = "")
-            cat("    Total:           $", disp_cost + reg$admin_cost,
-                "\n", sep = "")
-        }
-        cat("\n")
-        cat("  Administration events (days ",
-            min(reg$admin_days), "-", max(reg$admin_days), "):\n", sep = "")
-        cat("    ", n_admin_per_cycle,
-            " administrations per cycle\n", sep = "")
-        cat("    Cost already captured at dispensing\n")
-        cat("    (patients who discontinue mid-cycle still\n")
-        cat("     incur the full dispensing cost)\n")
-
-    } else if (reg$route == "oral" && !reg$oral_wastage) {
-        per_admin <- cost_single_admin_drug(reg)
-        cat("  Mode: PER-ADMINISTRATION (no oral wastage)\n")
-        cat("  Each administration costed individually:\n")
-        cat("    Drug cost per admin: $", per_admin, "\n", sep = "")
-        if (reg$admin_cost > 0)
-            cat("    Admin cost per admin: $", reg$admin_cost, "\n", sep = "")
-        cat("    Total per admin: $", per_admin + reg$admin_cost, "\n",
-            sep = "")
-        cat("    Total per med cycle: $",
-            (per_admin + reg$admin_cost) * n_admin_per_cycle, "\n",
-            sep = "")
-
-    } else {
-        # IV
-        per_admin <- cost_single_admin_drug(reg)
-        cat("  Mode: PER-ADMINISTRATION (", toupper(reg$route), ")\n", sep = "")
-        cat("  Each visit costed individually:\n")
-        cat("    Drug cost per admin: $", per_admin, "\n", sep = "")
-        cat("    Admin cost per admin: $", reg$admin_cost, "\n", sep = "")
-        cat("    Total per admin: $", per_admin + reg$admin_cost, "\n",
-            sep = "")
-        cat("    Total per med cycle (",
-            n_admin_per_cycle, " admins): $",
-            (per_admin + reg$admin_cost) * n_admin_per_cycle,
-            "\n", sep = "")
     }
 
     cat("\n", divider, "\n\n", sep = "")

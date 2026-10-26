@@ -2,7 +2,7 @@
 % Please edit documentation in R/cost_single.R
 \name{cost_single_admin_drug}
 \alias{cost_single_admin_drug}
-\title{Cost of a single administration (dispatch by route)}
+\title{Expected drug cost of one administration}
 \usage{
 cost_single_admin_drug(reg)
 }
@@ -10,11 +10,12 @@ cost_single_admin_drug(reg)
 \item{reg}{A med_regimen object.}
 }
 \value{
-Numeric scalar: drug cost only (no admin cost) of one admin.
+Numeric scalar.
 }
 \description{
-When distribution parameters (patient_weight_sd or patient_bsa_sd) are
-present, computes the weighted average cost across quantile bins of the
-patient parameter distribution.
+For a fixed dose, the cost of that dose. With a patient distribution
+(\code{patient_weight_sd} or \code{patient_bsa_sd} matching the dose
+basis), the expected cost over the lognormal distribution. Under
+\code{no_wastage = TRUE}, the lowest cost per mg times the expected dose.
 }
 \keyword{internal}

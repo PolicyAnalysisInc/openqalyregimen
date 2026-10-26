@@ -12,7 +12,8 @@ validate_shared_admin(shared_admin, drug_names)
 \item{drug_names}{Character vector of drug names from the regimens.}
 }
 \value{
-NULL (no sharing) or a list of character vectors (sharing groups).
+NULL (no sharing) or a list of character vectors (sharing groups),
+each in input order.
 }
 \description{
 Validate and normalise the shared_admin parameter

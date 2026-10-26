@@ -20,7 +20,9 @@ This vignette shows how to cost oral drug regimens using `openqalyregimen`. Each
 section walks through a specific use case, introducing functions and parameters
 as they become relevant.
 
-For IV/SC/IM drugs, see `vignette("iv-regimens")`. For multi-drug combinations,
+Costing works the same way for every route: `route` is a label only. Oral
+regimens differ from IV regimens only in the settings you choose for them. For
+IV/SC/IM drugs, see `vignette("iv-regimens")`. For multi-drug combinations,
 loading doses, and phase changes, see `vignette("combinations-and-phases")`.
 
 ## 1. Costing a Daily Oral Drug
@@ -30,19 +32,30 @@ medication cycle. Here a drug is dosed at 420 mg once daily on a continuous
 28-day cycle (an ibrutinib-like schedule). Available tablet strengths are 140,
 280, 420, and 560 mg, with a per-tablet cost derived from the pack price.
 
-Start by defining the regimen with `define_regimen()`, then use
-`summarise_regimen()` to inspect how the dose maps to tablets. The text summary
-shows the tablet breakdown per administration, the dispensing mode (oral wastage
-vs per-administration), the medication cycle schedule, and the treatment
-duration cap.
+Every regimen that is costed from units states two things explicitly:
+
+- `exact` -- whether the units must make up the prescribed dose exactly.
+  Tablets are not cut, so whole-tablet doses use `exact = TRUE`. If the tablets
+  can't make up the dose exactly, costing stops with an error.
+- `charge_timing` -- when the drug cost is recorded: `"per_admin"` (each dose
+  on the day it is taken) or `"per_dispensing"` (a whole medication cycle's
+  doses on day 1 of that cycle, as when the pharmacy dispenses the cycle's
+  supply up front).
+
+Define the regimen with `define_regimen()`, then use `summarise_regimen()` to
+inspect how the dose maps to tablets. The summary lists the available units with
+their price and price per mg, the units used for one administration, and the
+resulting costs.
 
 ```{r oral-continuous-define}
 reg_continuous <- define_regimen(
   name = "Oral Drug A",
   route = "oral",
   dose_per_admin = 420,
-  available_strengths = c(140, 280, 420, 560),
+  unit_size = c(140, 280, 420, 560),
   unit_cost = 1430.80 / 28,
+  exact = TRUE,
+  charge_timing = "per_dispensing",
   med_cycle_length = 28,
   admin_days = 1:28
 )
@@ -57,14 +70,13 @@ Now calculate cycle-by-cycle costs with `calculate_med_costs()`. The
 - **Start Day** -- The first day of this model cycle (day 0 is the start of the
   model).
 - **End Day** -- The day after the last day of this model cycle.
-- **N Dispensing** -- Number of dispensing events that fall within this model
-  cycle. For oral drugs with wastage (the default), one dispensing event
-  occurs at the start of each medication cycle.
-- **N Tablets** -- Total tablets dispensed in this model cycle (across all
-  dispensing events).
-- **Drug Cost** -- Total drug acquisition cost for this model cycle.
-- **Admin Cost** -- Total administration/dispensing cost (here \$0).
-- **Total Cost** -- Drug Cost + Admin Cost.
+- **N Admins** -- Number of administrations (doses taken) in this model cycle.
+- **N Dispensing** -- Number of medication cycles that start in this model
+  cycle.
+- **Drug Cost** -- Drug acquisition cost recorded in this model cycle.
+- **Admin Cost** -- Fees charged each time the patient is dosed (here \$0).
+- **Dispensing Cost** -- Fees charged once per medication cycle (here \$0).
+- **Total Cost** -- Drug Cost + Admin Cost + Dispensing Cost.
 
 ```{r oral-continuous-costs}
 costs_continuous <- calculate_med_costs(
@@ -76,116 +88,92 @@ costs_continuous <- calculate_med_costs(
 as_flextable(costs_continuous)
 ```
 
-**Verify:** The optimal tablet combination for 420 mg is 1 x 420 mg tablet.
-Each model cycle has 28 tablets at \$51.10 each, so Drug Cost = 28 x \$51.10
-= \$1,430.80 per cycle.
+**Verify:** The cheapest exact tablet combination for 420 mg is 1 x 420 mg
+tablet at \$51.10. Each 28-day medication cycle has 28 doses, so Drug Cost =
+28 x \$51.10 = \$1,430.80 per cycle.
 
-### Oral wastage
+### Charge timing
 
-By default, oral drugs use `oral_wastage = TRUE`: the full medication cycle's
-supply is dispensed at the start of each medication cycle, and all drug cost is
-assigned to the dispensing day. A patient who discontinues mid-cycle still
-incurs the full dispensing cost. This models real-world pharmacy dispensing where
-the entire cycle's tablets are handed to the patient upfront.
-
-Setting `oral_wastage = FALSE` attributes cost per-administration instead, the
-same way IV drugs are costed. Each administration day carries its own drug cost.
+With `charge_timing = "per_dispensing"`, the whole medication cycle's drug cost
+is recorded on day 1 of the cycle. A patient who discontinues mid-cycle has
+still been dispensed, and costed, the full cycle. With `charge_timing =
+"per_admin"`, each dose's cost is recorded on the day it is taken.
 
 To see the difference, use `daily_detail = TRUE` for a row-per-day breakdown.
-The daily detail table (oral wastage variant) has a two-row header with column
-groups:
+The daily detail table has a two-row header with column groups:
 
-- **Medication Cycle** group:
-  - *Med Cycle* -- Which medication cycle this day belongs to.
-  - *Cycle Day* -- Day within the medication cycle (1-indexed).
-- **Administration** group:
-  - *Disp?* -- TRUE on dispensing days (day 1 of each medication cycle).
-  - *Doses* -- Number of doses taken on this day (0 or 1).
-  - *mg Taken* -- Milligrams actually taken on this day.
-  - *mg Dispensed* -- Milligram content of the tablets taken on this day.
-    This is a per-administration value, not the bulk cycle supply.
-- **Dispensing (Costed)** group — these columns show the costing attribution:
-  - *Doses Costed* -- Number of doses whose cost is assigned to this day.
-    On a dispensing day, this equals the total administrations in the medication
-    cycle. On non-dispensing days, this is 0.
-  - *Tabs* -- Tablets taken on this day.
-  - *Tabs Costed* -- Tablets whose cost is assigned to this day. On a dispensing
-    day, this is the full cycle's worth of tablets.
-  - *mg Costed* -- Milligrams whose cost is assigned to this day.
-- **Costs** group:
-  - *Drug Cost* -- Drug acquisition cost assigned to this day. On dispensing
-    days, this is the full medication cycle's drug cost. On administration-only
-    days, Drug Cost = \$0 because it was already charged at dispensing.
-  - *Admin Cost*, *Total Cost*.
+- **Day** and **Model Cycle** -- The model day and the model cycle it falls in.
+- **Medication Cycle** group: *Med Cycle* and *Cycle Day* (1-indexed).
+- **Given** group: *Doses* taken on this day and *mg Given*.
+- **Dispensed** group: *Units* (tablets) and *mg Dispensed* whose cost is
+  recorded on this day.
+- **Costs** group: *Drug Cost*, *Admin Cost*, *Dispensing Cost*, *Total Cost*.
 
-Here is a comparison — first with wastage (the default), where all cost is
-front-loaded to the dispensing day:
+First with `"per_dispensing"`, where the cycle's 28 doses are costed on day 1:
 
-```{r oral-wastage-daily}
-daily_wastage <- calculate_med_costs(
+```{r oral-dispensing-daily}
+daily_dispensing <- calculate_med_costs(
   reg_continuous,
   model_cycle_length = 28,
   n_cycles = 2,
   daily_detail = TRUE
 )
-as_flextable(daily_wastage)
+as_flextable(daily_dispensing)
 ```
 
-And the same regimen with `oral_wastage = FALSE`, where each administration day
-carries its own drug cost:
+And the same regimen with `"per_admin"`, where each day carries its own dose:
 
-```{r oral-no-wastage-daily}
-reg_no_wastage <- define_regimen(
-  name = "Oral Drug A (no wastage)",
+```{r oral-admin-daily}
+reg_per_admin <- define_regimen(
+  name = "Oral Drug A (per admin)",
   route = "oral",
   dose_per_admin = 420,
-  available_strengths = c(140, 280, 420, 560),
+  unit_size = c(140, 280, 420, 560),
   unit_cost = 1430.80 / 28,
+  exact = TRUE,
+  charge_timing = "per_admin",
   med_cycle_length = 28,
-  admin_days = 1:28,
-  oral_wastage = FALSE
+  admin_days = 1:28
 )
 
-daily_no_wastage <- calculate_med_costs(
-  reg_no_wastage,
+daily_per_admin <- calculate_med_costs(
+  reg_per_admin,
   model_cycle_length = 28,
   n_cycles = 2,
   daily_detail = TRUE
 )
-as_flextable(daily_no_wastage)
+as_flextable(daily_per_admin)
 ```
 
-Note that the column schema differs between the two modes: with
-`oral_wastage = TRUE`, the output contains `n_dispensing_events` and
-`n_tablets_dispensed` columns (costing unit = dispensing event); with
-`oral_wastage = FALSE`, it contains `n_administrations` (costing unit =
-individual administration).
+**Verify:** In the first table day 0 and day 28 each show 28 units dispensed
+and \$1,430.80 in drug cost, and every other day shows \$0. In the second
+table every day shows 1 unit and \$51.10. Both total \$1,430.80 per
+medication cycle; only the day the cost is recorded differs.
 
-### Dispensing costs
+### Dispensing and administration fees
 
-The `admin_cost` parameter adds a dispensing or administration cost. For oral
-drugs in the standard costing modes, `admin_cost` is charged once per dispensing
-event (i.e., once per medication cycle, on day 1), regardless of the
-`oral_wastage` setting. The `oral_wastage` parameter only controls how *drug*
-cost is attributed — upfront at dispensing (`TRUE`) or spread across individual
-administrations (`FALSE`). In `simple_daily_cost` mode, `admin_cost` is
-distributed uniformly across the medication cycle (just like drug cost), so
-`admin_cost / med_cycle_length` is charged per day.
+There are two fees, each charged on its own schedule:
 
-Here is an example with a \$25 dispensing cost — the Admin Cost column shows a
-single \$25 charge per cycle:
+- `dispensing_cost` -- charged once per medication cycle, on day 1 (a pharmacy
+  dispensing fee).
+- `admin_cost` -- charged each time the patient is dosed (for example an
+  infusion or injection fee). Oral regimens usually leave this at 0.
 
-```{r oral-admin-cost}
+Neither fee depends on `charge_timing`. Here is the regimen with a \$25
+dispensing fee:
+
+```{r oral-dispensing-fee}
 reg_with_disp <- define_regimen(
-  name = "Oral Drug A (with dispensing cost)",
+  name = "Oral Drug A (with dispensing fee)",
   route = "oral",
   dose_per_admin = 420,
-  available_strengths = c(140, 280, 420, 560),
+  unit_size = c(140, 280, 420, 560),
   unit_cost = 1430.80 / 28,
+  exact = TRUE,
+  charge_timing = "per_dispensing",
+  dispensing_cost = 25,
   med_cycle_length = 28,
-  admin_days = 1:28,
-  admin_cost = 25,
-  oral_wastage = TRUE
+  admin_days = 1:28
 )
 
 costs_with_disp <- calculate_med_costs(
@@ -197,16 +185,16 @@ costs_with_disp <- calculate_med_costs(
 as_flextable(costs_with_disp)
 ```
 
-**Verify:** Admin Cost = \$25.00 per cycle (one dispensing event per 28-day
-medication cycle). Drug Cost is unchanged at \$1,430.80, so Total Cost =
-\$1,455.80 per cycle. The same Admin Cost applies with `oral_wastage = FALSE`
-— only the drug cost attribution changes, not the dispensing charge.
+**Verify:** Dispensing Cost = \$25.00 per cycle (one medication cycle starts in
+each 28-day model cycle). Drug Cost is unchanged at \$1,430.80, so Total Cost
+= \$1,455.80 per cycle. Had the \$25 been entered as `admin_cost`, it would be
+charged on each of the 28 dosing days: \$700.00 per cycle.
 
 ## 2. Costing an Oral Drug with Rest Periods
 
-Many oral drugs are administered on only a subset of the medication cycle days.
-Here a drug is dosed at 25 mg on days 1--21 of a 28-day cycle, with a 7-day
-rest period (a lenalidomide-like schedule). The `admin_days` parameter defines
+Many oral drugs are taken on only some days of the medication cycle. Here a
+drug is dosed at 25 mg on days 1--21 of a 28-day cycle, with a 7-day rest
+period (a lenalidomide-like schedule). The `admin_days` parameter defines
 exactly which days within the medication cycle have an administration.
 
 ```{r oral-rest-define}
@@ -214,18 +202,19 @@ reg_rest <- define_regimen(
   name = "Oral Drug B",
   route = "oral",
   dose_per_admin = 25,
-  available_strengths = c(2.5, 5, 7.5, 10, 15, 20, 25),
+  unit_size = c(2.5, 5, 7.5, 10, 15, 20, 25),
   unit_cost = 4368 / 21,
+  exact = TRUE,
+  charge_timing = "per_dispensing",
   med_cycle_length = 28,
-  admin_days = 1:21,
-  oral_wastage = TRUE
+  admin_days = 1:21
 )
 
 summarise_regimen(reg_rest)
 ```
 
-The cost table shows 21 tablets dispensed per cycle (not 28), reflecting
-the rest period:
+The cost table shows 21 administrations per cycle (not 28), reflecting the rest
+period:
 
 ```{r oral-rest-costs}
 costs_rest <- calculate_med_costs(
@@ -237,26 +226,26 @@ costs_rest <- calculate_med_costs(
 as_flextable(costs_rest)
 ```
 
-**Verify:** Only 21 tablets are dispensed per medication cycle because
-administration occurs only on days 1--21. Drug Cost = 21 x \$208.00 =
-\$4,368.00 per cycle.
+**Verify:** Only 21 doses are dispensed per medication cycle because
+administration occurs only on days 1--21. Each dose is 1 x 25 mg tablet at
+\$208.00, so Drug Cost = 21 x \$208.00 = \$4,368.00 per cycle.
 
 ### Inspecting the event schedule with `detail_schedule()`
 
 The `detail_schedule()` function produces a row-per-event view of the regimen,
 showing every dispensing and administration event on the model timeline. This is
-particularly useful for regimens with rest periods to verify which days are
-active.
+useful for regimens with rest periods to check which days are active.
 
 The `regimen_schedule` table has a two-row header with:
 
-- **Standalone columns**: *Day* (absolute model day), *Model Cycle*, *Event
-  Type* (either "dispensing" or "administration").
+- **Standalone columns**: *Day* (model day), *Model Cycle* and *Event Type*
+  (`"dispensing"` or `"administration"`).
 - **Medication Cycle** group: *Med Cycle*, *Cycle Day*.
-- **Costs** group: *Drug Cost*, *Admin Cost*, *Total Cost*.
+- **Costs** group: *Drug Cost*, *Admin Cost*, *Dispensing Cost*, *Total Cost*.
 
-With oral wastage, dispensing events carry the drug cost; administration events
-show the drug being taken but carry \$0 cost.
+With `charge_timing = "per_dispensing"`, each medication cycle starts with a
+dispensing row on cycle day 1 carrying the cycle's drug cost, followed by the
+administration rows, which carry \$0 drug cost.
 
 ```{r oral-schedule}
 schedule_rest <- detail_schedule(
@@ -267,77 +256,165 @@ schedule_rest <- detail_schedule(
 as_flextable(schedule_rest)
 ```
 
-**Verify:** Each medication cycle produces 1 dispensing event and 21
-administration events. Over 3 model cycles (= 3 medication cycles here,
-since both are 28 days), there are 3 dispensing events and 63 administration
-events.
+**Verify:** Each medication cycle produces 1 dispensing row and 21
+administration rows. Over 3 model cycles (= 3 medication cycles here, since
+both are 28 days), there are 3 dispensing rows and 63 administration rows.
 
-## 3. Using a Flat Daily Cost
+## 3. When Tablets Can't Make Up the Dose
 
-The `cost_per_day` parameter with `simple_daily_cost = TRUE` applies a flat
-cost-per-mg rate that distributes costs uniformly over time, bypassing tablet
-optimisation, wastage, and all dosing detail. No tablet breakdown, dispensing,
-or wastage columns appear. This is useful when detailed dosing mechanics are
-irrelevant and a simple per-day cost is sufficient.
+With a dose that depends on body surface area (`dose_basis = "bsa"`) or weight,
+the dose in mg changes with the patient value, and in sensitivity analyses
+or PSA it changes from run to run. With `exact = TRUE` the tablets must make up
+the prescribed dose exactly. When they can't, costing stops with an error that
+names the nearest amounts the tablets can make up. This happens when costs are
+calculated, for whichever dose is being costed.
 
-```{r oral-simple}
-reg_simple <- define_regimen(
-  name = "Daily cost drug",
+Here capecitabine is dosed at 1,250 mg/m² with 150 mg and 500 mg tablets. At a
+BSA of 1.80 m² the dose is 2,250 mg (3 x 500 mg + 5 x 150 mg):
+
+```{r oral-exact-ok}
+reg_cape <- define_regimen(
+  name = "Capecitabine",
   route = "oral",
-  cost_per_day = 5.00,
-  admin_cost = 21,
-  admin_days = 1:21,
-  med_cycle_length = 21
+  dose_per_admin = 1250,
+  dose_basis = "bsa",
+  patient_bsa = 1.80,
+  unit_size = c(150, 500),
+  unit_cost = 2.21,
+  exact = TRUE,
+  charge_timing = "per_dispensing",
+  med_cycle_length = 21,
+  admin_days = 1:14
 )
 
-sched_simple <- detail_schedule(
-  reg_simple,
-  model_cycle_length = 28,
-  n_cycles = 3,
-  simple_daily_cost = TRUE
-)
-
-as_flextable(sched_simple)
+summarise_regimen(reg_cape)
 ```
 
-**Verify:** Every day shows the same \$5.00 drug cost and \$1.00 admin
-cost (\$21.00 / 21 days), regardless of medication cycle boundaries.
-The flat daily rate removes all dosing detail — no dispensing events, no
-wastage, no tablet breakdown.
+At a BSA of 1.81 m² the dose is 2,262.5 mg, which no combination of whole
+150 mg and 500 mg tablets makes up:
 
-Now aggregate to model cycles:
-
-```{r oral-simple-model}
-costs_simple <- calculate_med_costs(
-  reg_simple,
-  model_cycle_length = 28,
-  n_cycles = 12,
-  simple_daily_cost = TRUE
+```{r oral-exact-error, error = TRUE}
+reg_cape_181 <- define_regimen(
+  name = "Capecitabine",
+  route = "oral",
+  dose_per_admin = 1250,
+  dose_basis = "bsa",
+  patient_bsa = 1.81,
+  unit_size = c(150, 500),
+  unit_cost = 2.21,
+  exact = TRUE,
+  charge_timing = "per_dispensing",
+  med_cycle_length = 21,
+  admin_days = 1:14
 )
 
-as_flextable(costs_simple)
+calculate_med_costs(reg_cape_181, model_cycle_length = 21, n_cycles = 4)
 ```
 
-**Verify:** Each 28-day model cycle shows drug cost = 28 x \$5.00 =
-\$140.00 and admin cost = 28 x \$1.00 = \$28.00, for a total of
-\$168.00. The model cycle (28 days) differs from the medication cycle
-(21 days) — the daily rate smooths costs uniformly regardless of cycle
-alignment.
+To cost a dose that tablets can't make up, the model has to say what is
+dispensed instead. With `exact = FALSE` the cheapest tablets covering the dose
+are costed, and any drug left over is paid for:
 
-## 4. Capping Treatment Duration
+```{r oral-cover}
+reg_cape_cover <- define_regimen(
+  name = "Capecitabine (cover)",
+  route = "oral",
+  dose_per_admin = 1250,
+  dose_basis = "bsa",
+  patient_bsa = 1.81,
+  unit_size = c(150, 500),
+  unit_cost = 2.21,
+  exact = FALSE,
+  charge_timing = "per_dispensing",
+  med_cycle_length = 21,
+  admin_days = 1:14
+)
+
+summarise_regimen(reg_cape_cover)
+```
+
+**Verify:** All tablets cost \$2.21, so the cheapest cover is the one with
+fewest tablets: 5 x 500 mg = 2,500 mg for \$11.05, leaving 237.5 mg over.
+The smallest covering amount, 4 x 500 mg + 2 x 150 mg = 2,300 mg, needs 6
+tablets (\$13.26), so it is dearer.
+
+`exact = FALSE` can also be combined with `max_dose_rounding`, which rounds the
+dose down to the nearest amount the tablets make up exactly when that is
+cheaper and the shortfall is within the given share of the prescribed dose.
+See `vignette("iv-regimens")` for how rounding works.
+
+## 4. The No-Wastage Scenario
+
+A no-wastage scenario costs the prescribed dose at the lowest cost per mg among
+the available units, as if exactly the prescribed amount could be bought.
+Setting `no_wastage = TRUE` does this for any regimen. Dose rounding doesn't
+apply in this scenario, because it costs the prescribed dose.
+
+Here a 20 mg dose (a venetoclax-like ramp-up week; illustrative price) is made
+from 10 mg, 50 mg and 100 mg tablets, all priced at \$42.76 per tablet:
+
+```{r oral-no-wastage}
+reg_whole <- define_regimen(
+  name = "Oral Drug C",
+  route = "oral",
+  dose_per_admin = 20,
+  unit_size = c(10, 50, 100),
+  unit_cost = 42.76,
+  exact = TRUE,
+  charge_timing = "per_dispensing",
+  med_cycle_length = 7,
+  admin_days = 1:7
+)
+
+reg_no_waste <- define_regimen(
+  name = "Oral Drug C (no wastage)",
+  route = "oral",
+  dose_per_admin = 20,
+  unit_size = c(10, 50, 100),
+  unit_cost = 42.76,
+  exact = TRUE,
+  no_wastage = TRUE,
+  charge_timing = "per_dispensing",
+  med_cycle_length = 7,
+  admin_days = 1:7
+)
+
+rbind(
+  whole_tablets = calculate_med_costs(reg_whole, model_cycle_length = 7,
+                                      n_cycles = 1)$drug_cost,
+  no_wastage    = calculate_med_costs(reg_no_waste, model_cycle_length = 7,
+                                      n_cycles = 1)$drug_cost
+)
+```
+
+`summarise_regimen()` shows the no-wastage calculation (the lowest cost per
+mg and the unit it comes from) in place of a tablet combination, and in the
+daily detail `mg Dispensed` is the prescribed mg that is costed:
+
+```{r oral-no-wastage-summary}
+summarise_regimen(reg_no_waste)
+```
+
+**Verify:** With whole tablets each dose is 2 x 10 mg = \$85.52, or \$598.64
+for 7 doses. The lowest cost per mg is the 100 mg tablet (\$0.4276/mg), so the
+no-wastage dose costs 20 x \$0.4276 = \$8.552, or \$59.864 for 7 doses.
+
+## 5. Capping Treatment Duration
 
 The `max_med_cycles` parameter limits how many medication cycles are delivered,
 even if the model horizon extends further. Here we limit treatment to 12
-medication cycles over a 24-cycle model horizon. Costs drop to zero
-after 12 x 28 = 336 days:
+medication cycles over a 24-cycle model horizon. Costs drop to zero after 12 x
+28 = 336 days:
 
 ```{r oral-cap}
 reg_capped <- define_regimen(
   name = "Oral Drug A (capped)",
   route = "oral",
   dose_per_admin = 420,
-  available_strengths = c(140, 280, 420, 560),
+  unit_size = c(140, 280, 420, 560),
   unit_cost = 1430.80 / 28,
+  exact = TRUE,
+  charge_timing = "per_dispensing",
   med_cycle_length = 28,
   admin_days = 1:28,
   max_med_cycles = 12
@@ -355,29 +432,28 @@ as_flextable(costs_capped)
 **Verify:** Cycles 1--12 each show \$1,430.80 in drug cost. From cycle 13
 onward (day 336+), all costs drop to \$0.00.
 
-## 5. Offsetting Medication Start with `start_day`
+## 6. Offsetting Medication Start with `start_day`
 
-The `start_day` parameter sets the day on which the first medication
-cycle begins on the shared model timeline. Medication cycle 1 starts on
-`start_day`, cycle 2 starts on `start_day + med_cycle_length`, and so on
-(`start_day + (k-1) * med_cycle_length` for cycle *k*). Any model time
-before `start_day` simply has no medication activity.
+The `start_day` parameter sets the day on which the first medication cycle
+begins on the shared model timeline. Medication cycle 1 starts on `start_day`,
+cycle 2 starts on `start_day + med_cycle_length`, and so on (`start_day + (k-1)
+* med_cycle_length` for cycle *k*). Any model time before `start_day` has no
+medication activity.
 
-This is primarily useful for **chaining regimens** — for example, a
-maintenance drug that begins after an induction period. By setting
-`start_day = 56`, you position the entire medication timeline to start on
-day 56, rather than day 0.
-
-Here Oral Drug A starts on day 56 (after a 56-day induction phase),
-with treatment capped at 6 medication cycles:
+This is primarily useful for **chaining regimens** -- for example, a
+maintenance drug that begins after an induction period. Here Oral Drug A starts
+on day 56 (after a 56-day induction phase), with treatment capped at 6
+medication cycles:
 
 ```{r oral-delayed-define}
 reg_delayed <- define_regimen(
   name = "Oral Drug A (delayed)",
   route = "oral",
   dose_per_admin = 420,
-  available_strengths = c(140, 280, 420, 560),
+  unit_size = c(140, 280, 420, 560),
   unit_cost = 1430.80 / 28,
+  exact = TRUE,
+  charge_timing = "per_dispensing",
   med_cycle_length = 28,
   admin_days = 1:28,
   start_day = 56,
@@ -385,8 +461,8 @@ reg_delayed <- define_regimen(
 )
 ```
 
-First, inspect the event-level schedule with `detail_schedule()`. The
-**Med Cycle** column confirms that medication cycle 1 starts on day 56:
+First, inspect the event-level schedule with `detail_schedule()`. The **Med
+Cycle** column confirms that medication cycle 1 starts on day 56:
 
 ```{r oral-delayed-schedule}
 sched_delayed <- detail_schedule(
@@ -401,8 +477,8 @@ as_flextable(sched_delayed)
 **Verify:** Medication cycle 1 begins on day 56. All events fall within
 medication cycles 1--6.
 
-Now aggregate to **model cycles** with `calculate_med_costs()`. This is
-how the costs integrate into a Markov model:
+Now aggregate to **model cycles** with `calculate_med_costs()`. This is how the
+costs integrate into a Markov model:
 
 ```{r oral-delayed-model-cycles}
 costs_model_cycles <- calculate_med_costs(
@@ -415,6 +491,6 @@ as_flextable(costs_model_cycles)
 ```
 
 **Verify:** Model cycles 1--2 (days 0--55) show zero costs because they
-precede `start_day`. Medication cycle 1 maps to model cycle 3 (day 56),
-so model cycles 3--8 each show \$1,430.80. Model cycles 9--10 are
-beyond the 6-cycle cap and show \$0.00.
+precede `start_day`. Medication cycle 1 maps to model cycle 3 (day 56), so
+model cycles 3--8 each show \$1,430.80. Model cycles 9--10 are beyond the
+6-cycle cap and show \$0.00.

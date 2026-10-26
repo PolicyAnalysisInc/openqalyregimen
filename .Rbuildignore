@@ -17,3 +17,5 @@ env.RData
 ^vignettes/.*\.png$
 ^vignettes/.*\.html$
 ^vignettes/.*\.md$
+^README\.html$
+^\..*$

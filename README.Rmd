@@ -17,14 +17,19 @@ knitr::opts_chunk$set(
 
 <!-- badges: start -->
 [![CircleCI build status](https://circleci.com/gh/PolicyAnalysisInc/openqalyregimen.svg?style=svg)](https://app.circleci.com/pipelines/github/PolicyAnalysisInc/openqalyregimen)
-[![codecov](https://codecov.io/gh/PolicyAnalysisInc/openqalyregimen/graph/badge.svg?token=yFUlHZSVe4)](https://codecov.io/gh/PolicyAnalysisInc/openqalyregimen)<!-- badges: end -->
+[![codecov](https://codecov.io/gh/PolicyAnalysisInc/openqalyregimen/graph/badge.svg?token=yFUlHZSVe4)](https://app.codecov.io/gh/PolicyAnalysisInc/openqalyregimen)<!-- badges: end -->
 
 ## Overview
 
 The openqalyregimen package provides a declarative interface for defining treatment regimens and calculating medication costs. It handles a wide range of cases including:
-- Dosing per patient, per m2 of BSA, or per kg of weight
-- Oral medications with dispensing costs and oral wastage
-- IV and injection medications with administration costs, vials wastage, dose rounding
+
+- Dosing per patient, per m2 of BSA, or per kg of weight, with optional
+  averaging over a patient distribution of BSA or weight
+- One costing model for every product (tablets, vials and other units): the cheapest
+  units covering the dose, exact whole-unit doses, dose rounding against the
+  prescribed dose, or a no-wastage scenario
+- Drug cost recorded per administration or per dispensing, with separate
+  administration and dispensing fees
 - Handling of loading doses, dose escalation, and sequencing
 - Correctly attributes all costs to the model cycle schedule, even when medication cycles do not align with model cycles
 - Extensive debugging output to ensure transparency
@@ -52,9 +57,11 @@ reg <- define_regimen(
   med_cycle_length = 21,
   admin_days = 1:14,
   max_med_cycles = 4,
-  available_strengths = c(150, 500),
+  unit_size = c(150, 500),
   unit_cost = 2.21,
-  admin_cost = 45
+  exact = FALSE,
+  charge_timing = "per_dispensing",
+  dispensing_cost = 45
 )
 
 calculate_med_costs(
@@ -64,6 +71,10 @@ calculate_med_costs(
 )
 ```
 
+Because the dose is averaged over a BSA distribution, this example uses
+`exact = FALSE`: for each BSA the cheapest tablets covering the dose are
+costed. Exact whole-tablet dosing (`exact = TRUE`) needs a fixed dose.
+
 ## Learn more
 
 The package vignettes cover:
@@ -72,3 +83,8 @@ The package vignettes cover:
 - IV and injection regimens
 - Combinations, loading doses, and phase changes
 - Use inside an `openqaly` model
+
+## License
+
+Copyright (C) 2026 Avalere Health. Licensed under the GNU General Public
+License v3.0; see `LICENSE.md`.

@@ -1,275 +1,122 @@
-test_that("detail_schedule returns a data.frame", {
-  reg <- define_regimen(vial_size = 100, vial_cost = 500, admin_days = 1L)
-  out <- detail_schedule(reg, n_cycles = 5)
-  expect_s3_class(out, "data.frame")
-})
+reg_iv <- function(...) {
+  args <- list(name = "Drug A", dose_per_admin = 100, unit_size = 100,
+               unit_cost = 500, med_cycle_length = 21, admin_days = 1L,
+               exact = FALSE, charge_timing = "per_admin")
+  over <- list(...)
+  args[names(over)] <- over
+  do.call(define_regimen, args)
+}
 
-test_that("detail_schedule has all 8 required columns", {
-  reg <- define_regimen(vial_size = 100, vial_cost = 500, admin_days = 1L)
-  out <- detail_schedule(reg, n_cycles = 5)
-  expected_cols <- c("day", "med_cycle", "med_cycle_day",
-    "model_cycle", "event_type", "drug_cost",
-    "admin_cost", "total_cost")
-  expect_true(all(expected_cols %in% names(out)))
-})
+reg_oral <- function(...) {
+  args <- list(name = "Cape", route = "oral", dose_per_admin = 3600,
+               unit_size = c(150, 500), unit_cost = 2.21,
+               med_cycle_length = 21, admin_days = 1:14, exact = TRUE,
+               charge_timing = "per_dispensing")
+  over <- list(...)
+  args[names(over)] <- over
+  do.call(define_regimen, args)
+}
 
-test_that("detail_schedule total_cost equals drug_cost + admin_cost", {
-  reg <- define_regimen(vial_size = 100, vial_cost = 500, admin_days = 1L)
-  out <- detail_schedule(reg, n_cycles = 5)
-  expect_equal(out$total_cost, out$drug_cost + out$admin_cost)
+test_that("detail_schedule returns a regimen_schedule with expected columns", {
+  s <- detail_schedule(reg_iv(), model_cycle_length = 7, n_cycles = 6)
+  expect_s3_class(s, "regimen_schedule")
+  expect_equal(names(s), c("day", "med_cycle", "med_cycle_day", "model_cycle",
+                           "event_type", "drug_cost", "admin_cost",
+                           "dispensing_cost", "total_cost"))
 })
 
 test_that("detail_schedule errors on non-med_regimen input", {
-  expect_error(detail_schedule(list(a = 1)))
+  expect_error(detail_schedule(list()))
 })
 
-test_that("oral wastage: has both 'dispensing' and 'administration' event types", {
-  reg <- define_regimen(
-    route = "oral",
-    dose_per_admin = 100,
-    tablet_strength = 100,
-    unit_cost = 10,
-    med_cycle_length = 7,
-    admin_days = 1L
-  )
-  out <- detail_schedule(reg, n_cycles = 3)
-  expect_true("dispensing" %in% out$event_type)
-  expect_true("administration" %in% out$event_type)
+test_that("total_cost = drug + admin + dispensing", {
+  s <- detail_schedule(reg_oral(admin_cost = 3, dispensing_cost = 45),
+                       model_cycle_length = 7, n_cycles = 6)
+  expect_equal(s$total_cost, s$drug_cost + s$admin_cost + s$dispensing_cost)
 })
 
-test_that("oral wastage: dispensing events have positive cost, admin events have zero cost", {
-  reg <- define_regimen(
-    route = "oral",
-    dose_per_admin = 100,
-    tablet_strength = 100,
-    unit_cost = 10,
-    med_cycle_length = 7,
-    admin_days = 1L
-  )
-  out <- detail_schedule(reg, n_cycles = 3)
-  disp_rows <- out[out$event_type == "dispensing", ]
-  admin_rows <- out[out$event_type == "administration", ]
-  expect_true(all(disp_rows$drug_cost > 0))
-  expect_true(all(admin_rows$drug_cost == 0))
-  expect_true(all(admin_rows$total_cost == 0))
+test_that("per_admin with no dispensing fee: administration events only", {
+  s <- detail_schedule(reg_iv(admin_cost = 50), model_cycle_length = 7,
+                       n_cycles = 9)
+  expect_equal(unique(s$event_type), "administration")
+  expect_equal(nrow(s), 3)
+  expect_true(all(s$drug_cost == 500))
+  expect_true(all(s$admin_cost == 50))
 })
 
-test_that("IV: only 'administration' events, each with positive cost", {
-  reg <- define_regimen(
-    route = "iv",
-    dose_per_admin = 100,
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7,
-    admin_days = 1L
-  )
-  out <- detail_schedule(reg, n_cycles = 3)
-  expect_true(all(out$event_type == "administration"))
-  expect_true(all(out$drug_cost > 0))
+test_that("per_dispensing: one dispensing event per cycle carrying the drug cost", {
+  s <- detail_schedule(reg_oral(), model_cycle_length = 7, n_cycles = 6)
+  disp <- s[s$event_type == "dispensing", ]
+  adm <- s[s$event_type == "administration", ]
+  expect_equal(nrow(disp), 2)
+  expect_equal(nrow(adm), 28)
+  expect_equal(disp$drug_cost, rep(14 * 22.10, 2))
+  expect_true(all(adm$drug_cost == 0))
 })
 
-test_that("event count matches expected (K dispensing + K*D admin for oral wastage)", {
-  # med_cycle_length=7, one administration day, 3 model cycles of 7 days
-  # 3 med cycles => K=3 dispensing + 3*1=3 admin = 6 events
-  reg <- define_regimen(
-    route = "oral",
-    dose_per_admin = 100,
-    tablet_strength = 100,
-    unit_cost = 10,
-    med_cycle_length = 7,
-    admin_days = 1L
-  )
-  out <- detail_schedule(reg, model_cycle_length = 7, n_cycles = 3)
-  expect_equal(sum(out$event_type == "dispensing"), 3)
-  expect_equal(sum(out$event_type == "administration"), 3)
-  expect_equal(nrow(out), 6)
+test_that("a dispensing fee adds dispensing events under per_admin", {
+  s <- detail_schedule(reg_iv(dispensing_cost = 20), model_cycle_length = 21,
+                       n_cycles = 2)
+  expect_equal(s$event_type, rep(c("dispensing", "administration"), 2))
+  expect_equal(s$dispensing_cost, rep(c(20, 0), 2))
+  expect_equal(s$drug_cost, rep(c(0, 500), 2))
+})
+
+test_that("dispensing precedes administration on the same day", {
+  s <- detail_schedule(reg_oral(), model_cycle_length = 7, n_cycles = 3)
+  first <- s[s$day == 0, ]
+  expect_equal(first$event_type, c("dispensing", "administration"))
+})
+
+test_that("event days follow (mc - 1) * mcl + (ad - 1)", {
+  s <- detail_schedule(reg_iv(admin_days = c(1L, 8L, 15L)),
+                       model_cycle_length = 7, n_cycles = 6)
+  expect_equal(s$day, c(0, 7, 14, 21, 28, 35))
+  expect_equal(s$med_cycle, rep(1:2, each = 3))
+  expect_equal(s$med_cycle_day, rep(c(1, 8, 15), 2))
+})
+
+test_that("model_cycle assignment matches findInterval", {
+  s <- detail_schedule(reg_iv(admin_days = c(1L, 8L)), model_cycle_length = 10,
+                       n_cycles = 9)
+  expect_equal(s$model_cycle, findInterval(s$day, seq(0, 80, by = 10)))
 })
 
 test_that("max_med_cycles caps events", {
-  reg <- define_regimen(
-    route = "iv",
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7,
-    max_med_cycles = 2,
-    admin_days = 1L
-  )
-  out <- detail_schedule(reg, model_cycle_length = 7, n_cycles = 5)
-  # Only 2 med cycles, so only 2 admin events
-  expect_equal(nrow(out), 2)
-  # No events beyond day 14 (2 * 7)
-  expect_true(all(out$day < 14))
+  s <- detail_schedule(reg_iv(max_med_cycles = 2), model_cycle_length = 21,
+                       n_cycles = 6)
+  expect_equal(nrow(s), 2)
 })
 
-test_that("event days calculated correctly: (mc-1)*mcl + (ad-1)", {
-  reg <- define_regimen(
-    route = "iv",
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 21,
-    admin_days = c(1L, 8L, 15L)
-  )
-  out <- detail_schedule(reg, model_cycle_length = 21, n_cycles = 2)
-  # Med cycle 1: days 0, 7, 14
-  # Med cycle 2: days 21, 28, 35
-  expect_equal(out$day, c(0, 7, 14, 21, 28, 35))
+test_that("start_day shifts all events", {
+  s <- detail_schedule(reg_iv(start_day = 30), model_cycle_length = 7,
+                       n_cycles = 12)
+  expect_true(all(s$day >= 30))
+  expect_equal(s$day[1], 30)
 })
 
-test_that("model_cycle assignment matches findInterval on cycle_starts", {
-  reg <- define_regimen(
-    route = "iv",
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 21,
-    admin_days = 1L
-  )
-  out <- detail_schedule(reg, model_cycle_length = 7, n_cycles = 6)
-  # Admin days: 0, 21
-  # cycle_starts: 0, 7, 14, 21, 28, 35
-  # Day 0 -> interval 1, Day 21 -> interval 4
-  expect_equal(out$model_cycle, c(1, 4))
+test_that("start_day + max_med_cycles caps events", {
+  s <- detail_schedule(reg_iv(start_day = 21, max_med_cycles = 1),
+                       model_cycle_length = 21, n_cycles = 5)
+  expect_equal(s$day, 21)
 })
 
-test_that("cycle_times parameter works (custom cycle boundaries)", {
-  reg <- define_regimen(
-    route = "iv",
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 10,
-    admin_days = 1L
-  )
-  out <- detail_schedule(reg, cycle_times = c(0, 10, 20, 30))
-  # Admin at days 0, 10, 20, 30 (horizon = 40)
-  expect_equal(out$day, c(0, 10, 20, 30))
-  expect_equal(out$model_cycle, c(1, 2, 3, 4))
+test_that("custom and non-uniform cycle_times", {
+  s <- detail_schedule(reg_iv(med_cycle_length = 7), cycle_times = c(0, 7, 21))
+  expect_equal(s$model_cycle, c(1, 2, 2, 3, 3))
+  expect_equal(max(s$day), 28)
 })
 
-test_that("dispensing events precede administration events within each med cycle", {
-  reg <- define_regimen(
-    route = "oral",
-    dose_per_admin = 100,
-    tablet_strength = 100,
-    unit_cost = 10,
-    med_cycle_length = 7,
-    admin_days = c(1L, 4L)
-  )
-  out <- detail_schedule(reg, model_cycle_length = 7, n_cycles = 2)
-  for (mc in unique(out$med_cycle)) {
-    mc_events <- out[out$med_cycle == mc, ]
-    disp_idx <- which(mc_events$event_type == "dispensing")
-    admin_idx <- which(mc_events$event_type == "administration")
-    if (length(disp_idx) > 0 && length(admin_idx) > 0) {
-      expect_true(max(disp_idx) < min(admin_idx))
-    }
-  }
+test_that("schedule totals match calculate_med_costs", {
+  reg <- reg_oral(admin_cost = 3, dispensing_cost = 45)
+  s <- detail_schedule(reg, model_cycle_length = 7, n_cycles = 9)
+  res <- calculate_med_costs(reg, model_cycle_length = 7, n_cycles = 9)
+  expect_equal(sum(s$total_cost), sum(res$total_cost))
 })
 
-
-# ===========================================================================
-# start_day parameter
-# ===========================================================================
-
-test_that("start_day shifts all events; no events before start_day", {
-  reg <- define_regimen(
-    route = "iv",
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7,
-    start_day = 14,
-    admin_days = 1L
-  )
-  out <- detail_schedule(reg, model_cycle_length = 7, n_cycles = 6)
-  # No events before day 14
-
-  expect_true(all(out$day >= 14))
-  # First event at day 14
-  expect_equal(min(out$day), 14)
+test_that("route does not change the schedule", {
+  a <- detail_schedule(reg_iv(route = "sc"), n_cycles = 6)
+  b <- detail_schedule(reg_iv(route = "iv"), n_cycles = 6)
+  expect_equal(a, b)
 })
 
-test_that("start_day + max_med_cycles caps events correctly", {
-  reg <- define_regimen(
-    route = "iv",
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7,
-    max_med_cycles = 2,
-    start_day = 7,
-    admin_days = 1L
-  )
-  out <- detail_schedule(reg, model_cycle_length = 7, n_cycles = 6)
-  # Treatment from day 7 to day 21: admins at day 7, day 14
-  expect_equal(nrow(out), 2)
-  expect_equal(out$day, c(7, 14))
-})
-
-test_that("start_day = 0 gives same results as default", {
-  reg_default <- define_regimen(
-    route = "iv",
-    vial_size = 100, vial_cost = 500,
-    med_cycle_length = 7,
-    admin_days = 1L
-  )
-  reg_zero <- define_regimen(
-    route = "iv",
-    vial_size = 100, vial_cost = 500,
-    med_cycle_length = 7, start_day = 0, admin_days = 1L
-  )
-  out_default <- detail_schedule(reg_default, model_cycle_length = 7,
-    n_cycles = 4)
-  out_zero <- detail_schedule(reg_zero, model_cycle_length = 7,
-    n_cycles = 4)
-  expect_equal(out_default, out_zero)
-})
-
-
-# ===========================================================================
-# SC / IM routes
-# ===========================================================================
-
-test_that("SC produces only administration events (no dispensing)", {
-  reg <- define_regimen(
-    route = "sc",
-    dose_per_admin = 100,
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7,
-    admin_days = 1L
-  )
-  out <- detail_schedule(reg, model_cycle_length = 7, n_cycles = 3)
-  expect_true(all(out$event_type == "administration"))
-  expect_true(all(out$drug_cost > 0))
-})
-
-test_that("IM produces only administration events (no dispensing)", {
-  reg <- define_regimen(
-    route = "im",
-    dose_per_admin = 100,
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7,
-    admin_days = 1L
-  )
-  out <- detail_schedule(reg, model_cycle_length = 7, n_cycles = 3)
-  expect_true(all(out$event_type == "administration"))
-})
-
-
-# ===========================================================================
-# Non-uniform cycle_times
-# ===========================================================================
-
-test_that("non-uniform cycle_times: correct model_cycle assignments and horizon", {
-  reg <- define_regimen(
-    route = "iv",
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7,
-    admin_days = 1L
-  )
-  # cycle_times = c(0, 7, 14, 28) => cycle_ends = c(7, 14, 28, 42)
-  # horizon = 42, so admins at days 0, 7, 14, 21, 28, 35
-  out <- detail_schedule(reg, cycle_times = c(0, 7, 14, 28))
-  expect_equal(out$day, c(0, 7, 14, 21, 28, 35))
-  # model_cycle: day 0->1, day 7->2, day 14->3, day 21->3, day 28->4, day 35->4
-  expect_equal(out$model_cycle, c(1, 2, 3, 3, 4, 4))
-})

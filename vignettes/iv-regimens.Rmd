@@ -21,13 +21,28 @@ intramuscular (IM) drug regimens using `openqalyregimen`. Each section walks
 through a specific use case, introducing functions and parameters as they become
 relevant.
 
-For oral drugs, see `vignette("oral-regimens")`. For multi-drug combinations,
-loading doses, and phase changes, see `vignette("combinations-and-phases")`.
+Costing works the same way for every route: `route` is a label only. For oral
+drugs, see `vignette("oral-regimens")`. For multi-drug combinations, loading
+doses, and phase changes, see `vignette("combinations-and-phases")`.
 
 ## 1. Costing a Flat-Dose IV Drug
 
 The simplest IV regimen is a flat dose with a single vial size. Here a drug is
 dosed at 200 mg using 100 mg vials (a pembrolizumab-like schedule).
+
+Every regimen costed from units states two settings explicitly:
+
+- `exact` -- whether the vials must make up the prescribed dose exactly.
+  Single-use vials are usually costed with `exact = FALSE`: the cheapest vials
+  covering the dose are opened, and any drug left over is discarded and paid
+  for.
+- `charge_timing` -- when the drug cost is recorded: `"per_admin"` (on each
+  administration day) or `"per_dispensing"` (a whole medication cycle's doses on
+  day 1 of the cycle). IV drugs are usually costed `"per_admin"`.
+
+`admin_cost` is a fee charged each time the patient is dosed (infusion chair
+time, nursing and so on). A fee charged once per medication cycle, such as a
+pharmacy fee, goes in `dispensing_cost`.
 
 Start by defining the regimen with `define_regimen()`, then use
 `summarise_regimen()` to inspect the vial breakdown for a single
@@ -42,8 +57,10 @@ reg_flat <- define_regimen(
   med_cycle_length = 21,
   admin_days = 1,
   max_med_cycles = 35,
-  vial_sizes = 100,
-  vial_cost = 2630,
+  unit_size = 100,
+  unit_cost = 2630,
+  exact = FALSE,
+  charge_timing = "per_admin",
   admin_cost = 241
 )
 
@@ -56,10 +73,12 @@ has one row per model cycle with the following columns:
 - **Cycle** -- Sequential model cycle number.
 - **Start Day** / **End Day** -- Model cycle boundaries.
 - **N Admins** -- Number of IV administrations in this model cycle.
+- **N Dispensing** -- Number of medication cycles that start in this model
+  cycle.
 - **Drug Cost** -- Total drug acquisition cost (N Admins x per-admin drug cost).
-- **Admin Cost** -- Total administration cost (N Admins x per-admin admin cost).
-  The `admin_cost` parameter covers infusion chair time, nursing, etc.
-- **Total Cost** -- Drug Cost + Admin Cost.
+- **Admin Cost** -- N Admins x `admin_cost`.
+- **Dispensing Cost** -- N Dispensing x `dispensing_cost` (here \$0).
+- **Total Cost** -- Drug Cost + Admin Cost + Dispensing Cost.
 
 ```{r iv-flat-costs}
 costs_flat <- calculate_med_costs(
@@ -71,12 +90,12 @@ costs_flat <- calculate_med_costs(
 as_flextable(costs_flat)
 ```
 
-**Verify:** Each administration uses 2 x 100 mg vials = 200 mg with zero
-wastage. Drug Cost per admin = 2 x \$2,630 = \$5,260. Admin Cost = \$241 per
+**Verify:** Each administration uses 2 x 100 mg vials = 200 mg with nothing
+left over. Drug Cost per admin = 2 x \$2,630 = \$5,260. Admin Cost = \$241 per
 admin. Total Cost = \$5,501 per cycle.
 
-Setting `daily_detail = TRUE` produces a row-per-day breakdown showing vial
-usage on each administration day. This is useful for verifying exactly which
+Setting `daily_detail = TRUE` produces a row-per-day breakdown showing the vials
+used on each administration day. This is useful for verifying exactly which
 days incur costs.
 
 ```{r iv-flat-daily}
@@ -89,72 +108,60 @@ daily_iv <- calculate_med_costs(
 as_flextable(daily_iv)
 ```
 
-The `regimen_daily_detail` table (IV variant) has a two-row header with groups:
+The `regimen_daily_detail` table has a two-row header with groups:
 
 - **Medication Cycle** group: *Med Cycle*, *Cycle Day*.
-- **Dosing Detail** group: *Admin?*, *Doses*, *mg Taken*, *mg Vials*
-  (total drug content in opened vials), *mg Waste* (drug discarded), *Vials*
-  (number opened).
-- **Costs** group: *Drug Cost*, *Admin Cost*, *Total Cost*.
+- **Given** group: *Doses* and *mg Given* (the dose actually given, after any
+  dose rounding).
+- **Dispensed** group: *Units* (vials opened) and *mg Dispensed* (drug in those
+  vials) whose cost is recorded on this day.
+- **Costs** group: *Drug Cost*, *Admin Cost*, *Dispensing Cost*, *Total Cost*.
 
-On administration days, mg Vials = mg Taken + mg Waste. On non-administration
-days, all dosing and cost columns are zero.
+On administration days, mg Dispensed - mg Given is the drug left over and
+discarded. On non-administration days, all dosing and cost columns are zero.
 
 ## 2. Costing with Multiple Vial Sizes
 
-When multiple vial sizes are available, the algorithm selects vials using the
-following priority hierarchy, consistent with the Australian PBS vial
-combination algorithm and CMS billing guidance:
+When several vial sizes are available, the vials for a dose are chosen as
+follows (with `exact = FALSE`):
 
-1. **Exact fill.** If any combination of available vials sums to exactly the
-   prescribed dose, that combination is used. Among multiple exact-fill options,
-   the cheapest is selected. This eliminates avoidable drug waste -- drug that
-   would be opened but not administered.
+1. **Cheapest cover.** Among all combinations of whole vials holding at least
+   the prescribed dose, the cheapest is used. An exact fill is used when it is
+   the cheapest (or tied for cheapest); it is not preferred when a covering
+   combination costs less.
+2. **Ties.** Among equally cheap combinations, the one with the least total
+   drug wins, then the one with the fewest vials.
+3. **Dose rounding (optional).** With `max_dose_rounding` above 0, if the
+   cheapest cover leaves drug over, the dose may be rounded down to the nearest
+   amount the vials make up exactly. This happens only if the shortfall is at
+   most `max_dose_rounding` times the *prescribed dose*, and that amount is
+   strictly cheaper. The patient is then given the rounded dose.
 
-2. **Under-fill within tolerance.** When no exact fill exists and a
-   `wastage_threshold` is specified, the algorithm searches for the closest
-   achievable dose below the prescribed dose. If the shortfall would only be
-   covered by opening a vial that is predominantly wasted (fraction used <=
-   threshold), and the under-fill is cheaper than the overshoot option, the
-   under-fill is selected. This implements dose banding: the patient receives a
-   slightly reduced dose to avoid opening a barely-used vial.
-
-3. **Overshoot.** When neither exact fill nor an acceptable, cheaper under-fill
-   is available, the algorithm finds the cheapest combination of vials whose
-   total content exceeds the prescribed dose. The patient receives their full
-   prescribed dose; excess drug remains in the vial. Among equal-cost options,
-   the combination with less total drug content (less waste) is preferred.
-
-The selection within each tier is solved via dynamic programming. The decision
-logic is summarised below:
+The search is solved exactly by dynamic programming over the vial sizes.
 
 ```text
-                  Can any combination of
-                vials sum to exactly the dose?
-                     /              \
-                   YES               NO
-                    |                 |
-          Use cheapest         Is wastage_threshold > 0?
-          exact fill.              /          \
-          Waste = 0.             YES           NO
-                                  |             |
-                    Is there an achievable       |
-                    dose below prescribed        |
-                    where the shortfall          |
-                    fraction <= threshold?        |
-                        /          \             |
-                      YES           NO           |
-                       |             \          /
-              Is under-fill       Use cheapest
-              cheaper than        combination that
-              overshoot?          covers the dose.
-               /       \
-             YES        NO
-              |          |
-        Use the      Use cheapest
-        under-fill.  combination that
-        Waste = 0.   covers the dose.
+     Cheapest combination of vials holding >= the dose
+     (ties: least drug, then fewest vials)
+                        |
+          Does it leave drug over, and is
+          max_dose_rounding > 0?
+             /                    \
+           NO                      YES
+            |                       |
+     Use the cover.      Nearest amount below the dose that
+                         the vials make up exactly: is the
+                         shortfall <= max_dose_rounding x dose,
+                         and is it cheaper?
+                            /              \
+                          YES               NO
+                           |                 |
+                  Give the rounded     Use the cover.
+                  dose. Nothing
+                  left over.
 ```
+
+With `exact = TRUE` the vials must make up the prescribed dose exactly, and
+costing stops with an error if they can't; see `vignette("oral-regimens")`.
 
 Here a drug is dosed at 240 mg flat with vial sizes 40, 100, 120, and 240 mg (a
 nivolumab-like schedule):
@@ -167,23 +174,22 @@ reg_multi <- define_regimen(
   dose_basis = "flat",
   med_cycle_length = 14,
   admin_days = 1,
-  vial_sizes = c(40, 100, 120, 240),
-  vial_cost = c(439, 1097, 1317, 2633),
-  admin_cost = 0
+  unit_size = c(40, 100, 120, 240),
+  unit_cost = c(439, 1097, 1317, 2633),
+  exact = FALSE,
+  charge_timing = "per_admin"
 )
 
 summarise_regimen(reg_multi)
 ```
 
-**Verify:** 240 mg is filled exactly with zero wastage at \$2,633. Multiple
-combinations achieve this — the algorithm selects 2 x 100 mg + 1 x 40 mg,
-which ties in cost with 1 x 240 mg.
+**Verify:** 240 mg is filled exactly at \$2,633. Two combinations hold exactly
+240 mg at this cost (1 x 240 mg, and 2 x 100 mg + 1 x 40 mg); the tie goes to
+the one with fewer vials, 1 x 240 mg.
 
-Now consider a dose where no combination of available vial sizes sums exactly
-to the prescribed amount. At 250 mg, the algorithm cannot achieve an exact fill
-with 40/100/120/240 mg vials, so it falls back to the overshoot tier (tier 3)
-and selects the cheapest covering combination — 1 x 100 mg + 4 x 40 mg =
-260 mg — delivering the full 250 mg dose with 10 mg of waste:
+Now consider a dose that no combination of these vials makes up exactly. At
+250 mg the cheapest cover holds 260 mg, and the full 250 mg dose is given with
+10 mg left over:
 
 ```{r iv-multi-vial-residual}
 reg_residual <- define_regimen(
@@ -193,74 +199,76 @@ reg_residual <- define_regimen(
   dose_basis = "flat",
   med_cycle_length = 14,
   admin_days = 1,
-  vial_sizes = c(40, 100, 120, 240),
-  vial_cost = c(439, 1097, 1317, 2633),
-  admin_cost = 0
+  unit_size = c(40, 100, 120, 240),
+  unit_cost = c(439, 1097, 1317, 2633),
+  exact = FALSE,
+  charge_timing = "per_admin"
 )
 
 summarise_regimen(reg_residual)
 ```
 
-**Verify:** No combination of 40/100/120/240 mg vials sums to exactly 250 mg,
-so the algorithm overshoots to 260 mg (1 x 100 mg + 4 x 40 mg) with 10 mg
-waste. Drug Cost = \$1,097 + 4 x \$439 = \$2,853.
+**Verify:** Two combinations hold 260 mg for \$2,853: 1 x 100 mg + 4 x 40 mg,
+and 1 x 120 mg + 1 x 100 mg + 1 x 40 mg. Both hold the same drug, so the tie
+goes to fewer vials: 1 x 120 mg + 1 x 100 mg + 1 x 40 mg = \$1,317 + \$1,097 +
+\$439 = \$2,853, with 10 mg left over.
 
-### Wastage threshold and dose banding
+### Dose rounding
 
-The `wastage_threshold` parameter (between 0.0 and 1.0) activates the
-under-fill tier (tier 2) of the vial selection hierarchy. When no exact fill
-exists, the algorithm looks for the closest achievable dose below the prescribed
-dose. If the shortfall from the prescribed dose would require opening a vial
-where the fraction used is at or below the threshold, and the under-fill is
-cheaper than the overshoot alternative, the algorithm selects the under-fill and
-the patient receives a slightly reduced dose.
+Many payers and pharmacies round a dose to the nearest vial amount when the
+change is small relative to the ordered dose (for example within 10%). The
+`max_dose_rounding` parameter (from 0 up to, but not including, 1) allows this:
+it is the largest share of the prescribed dose that may be rounded away.
 
-Here a drug is dosed at 850 mg with 200 mg and 500 mg vials. Without a wastage
-threshold, the algorithm overshoots: 1 x 500 mg + 2 x 200 mg = 900 mg,
-delivering the full dose with 50 mg waste:
+Here a drug is dosed at 850 mg with 200 mg and 500 mg vials. Without rounding,
+the cheapest cover is 1 x 500 mg + 2 x 200 mg = 900 mg, giving the full dose
+with 50 mg left over:
 
-```{r iv-wastage}
-reg_wastage <- define_regimen(
+```{r iv-rounding}
+reg_round0 <- define_regimen(
   name = "IV Drug C 850mg",
   route = "iv",
   dose_per_admin = 850,
   dose_basis = "flat",
   med_cycle_length = 28,
   admin_days = c(1, 15),
-  vial_sizes = c(200, 500),
-  vial_cost = c(1500, 3500),
-  wastage_threshold = 0,
-  admin_cost = 0
+  unit_size = c(200, 500),
+  unit_cost = c(1500, 3500),
+  exact = FALSE,
+  charge_timing = "per_admin"
 )
 
-summarise_regimen(reg_wastage)
+summarise_regimen(reg_round0)
 ```
 
-With `wastage_threshold = 0.25`, the algorithm finds that the 50 mg shortfall
-would use only 50/200 = 25% of a 200 mg vial, which is at the threshold. It
-selects the under-fill instead: 4 x 200 mg = 800 mg with zero waste at \$6,000:
+With `max_dose_rounding = 0.10`, the nearest amount below 850 mg that the vials
+make up exactly is 800 mg (4 x 200 mg). The shortfall is 50 mg, which is 5.9% of
+the prescribed 850 mg, within 10%, and 800 mg costs less, so the dose is rounded
+down to 800 mg:
 
-```{r iv-wastage-zero}
-reg_wastage_thresh <- define_regimen(
-  name = "IV Drug C 850mg (threshold 0.25)",
+```{r iv-rounding-10}
+reg_round10 <- define_regimen(
+  name = "IV Drug C 850mg (rounding 10%)",
   route = "iv",
   dose_per_admin = 850,
   dose_basis = "flat",
   med_cycle_length = 28,
   admin_days = c(1, 15),
-  vial_sizes = c(200, 500),
-  vial_cost = c(1500, 3500),
-  wastage_threshold = 0.25,
-  admin_cost = 0
+  unit_size = c(200, 500),
+  unit_cost = c(1500, 3500),
+  exact = FALSE,
+  max_dose_rounding = 0.10,
+  charge_timing = "per_admin"
 )
 
-summarise_regimen(reg_wastage_thresh)
+summarise_regimen(reg_round10)
 ```
 
-**Verify:** Without threshold: 1 x 500 mg + 2 x 200 mg = 900 mg, cost =
-\$3,500 + 2 x \$1,500 = \$6,500, waste = 50 mg. With threshold 0.25: the
-marginal 200 mg vial is skipped (50/200 = 0.25 <= 0.25), so 4 x 200 mg =
-800 mg, cost = 4 x \$1,500 = \$6,000, waste = 0 mg.
+**Verify:** Without rounding: 1 x 500 mg + 2 x 200 mg = 900 mg, cost = \$3,500 +
+2 x \$1,500 = \$6,500, 50 mg left over. With rounding of 10%: 4 x 200 mg =
+800 mg given, cost = 4 x \$1,500 = \$6,000, nothing left over. With
+`max_dose_rounding = 0.05` the 5.9% shortfall is too large and the cost stays at
+\$6,500.
 
 ## 3. Costing a Weight-Based IV Drug
 
@@ -280,9 +288,10 @@ reg_weight <- define_regimen(
   patient_weight = 70,
   med_cycle_length = 14,
   admin_days = 1,
-  vial_sizes = c(40, 100, 120, 240),
-  vial_cost = c(439, 1097, 1317, 2633),
-  admin_cost = 0
+  unit_size = c(40, 100, 120, 240),
+  unit_cost = c(439, 1097, 1317, 2633),
+  exact = FALSE,
+  charge_timing = "per_admin"
 )
 
 summarise_regimen(reg_weight)
@@ -294,16 +303,16 @@ And the cycle-by-cycle costs:
 costs_weight <- calculate_med_costs(
   reg_weight,
   model_cycle_length = 28,
-  n_cycles = 26,
-  subcycle_precision = TRUE
+  n_cycles = 26
 )
 
 as_flextable(costs_weight)
 ```
 
-**Verify:** Dose = 3 x 70 = 210 mg. The optimal packing finds the cheapest
-vial combination covering 210 mg. Check `summarise_regimen()` output for the
-exact vial selection and cost.
+**Verify:** Dose = 3 x 70 = 210 mg. The cheapest cover is 1 x 120 mg + 1 x
+100 mg = 220 mg for \$2,414 (10 mg left over); 1 x 100 mg + 3 x 40 mg holds the
+same 220 mg at the same cost but needs more vials. Two administrations fall in
+each 28-day model cycle, so Drug Cost = 2 x \$2,414 = \$4,828.
 
 ### Distribution-averaged costs
 
@@ -312,8 +321,9 @@ population of patients, not just the cost for one specific patient. Adding
 `patient_weight_sd` enables distribution-averaged costing.
 
 The package models the patient parameter with a lognormal distribution,
-identifies cost breakpoints where the vial combination changes, and computes a
-probability-weighted average cost. This matters because the cost function is a
+identifies the breakpoints where the cost changes (doses the vials make up
+exactly, and with rounding the doses where the shortfall reaches
+`max_dose_rounding`), and computes a probability-weighted average cost. This matters because the cost function is a
 step function: the expected cost across weights does not equal the cost at the
 expected weight.
 
@@ -327,72 +337,79 @@ reg_dist <- define_regimen(
   patient_weight_sd = 12,
   med_cycle_length = 14,
   admin_days = 1,
-  vial_sizes = c(40, 100, 120, 240),
-  vial_cost = c(439, 1097, 1317, 2633),
-  admin_cost = 0
+  unit_size = c(40, 100, 120, 240),
+  unit_cost = c(439, 1097, 1317, 2633),
+  exact = FALSE,
+  charge_timing = "per_admin"
 )
 
 summarise_regimen(reg_dist)
 ```
 
-The cycle-by-cycle costs now reflect the distribution-averaged per-admin cost:
+The cycle-by-cycle costs now reflect the distribution-averaged per-admin cost.
+Because this cost is an average over patients, `daily_detail = TRUE` for a
+regimen with a distribution shows the doses and costs only, without mg or unit
+columns; the per-patient detail is in `diagnose_dosing()`, below.
 
 ```{r iv-dist-costs}
 costs_dist <- calculate_med_costs(
   reg_dist,
   model_cycle_length = 28,
-  n_cycles = 26,
-  subcycle_precision = TRUE
+  n_cycles = 26
 )
 
 as_flextable(costs_dist)
 ```
 
-**Verify:** Compare the per-cycle drug cost here with the point-estimate cost
-from the fixed-weight example above. The distribution-averaged cost will differ
-because patients above and below the mean weight may fall into different vial
-combinations with different costs.
+**Verify:** The expected cost per administration is \$2,413.78, against
+\$2,414.00 at exactly 70 kg, so the per-cycle drug cost is \$4,827.56 rather
+than \$4,828.00. Patients above and below the mean weight fall into different
+vial combinations with different costs.
 
 ### Inspecting dose bins with `diagnose_dosing()`
 
 The `diagnose_dosing()` function produces a detailed breakdown of how patient
-parameter variation maps to dose bins, vial combinations, probabilities, and
+parameter variation maps to dose bins, unit combinations, probabilities, and
 costs. This is the primary diagnostic table for verifying distribution-averaged
 costs.
 
 The `dosing_detail` table has one row per dose bin with the following columns:
 
-- **Bin** -- Sequential bin number. Each bin represents a range of patient
-  values that produce the same vial combination.
+- **Bin** -- Sequential bin number. Each bin is a range of patient values with
+  the same unit combination and cost.
 - **Prob.** -- Probability that a randomly drawn patient falls in this bin.
   Values across all bins sum to approximately 1.0.
-- **Patient Range (kg or m^2^)** -- Range of patient parameter values that
-  produce the same vial combination.
+- **Patient Range (kg or m^2^)** -- Range of patient parameter values in the
+  bin.
 - **Dose Rate (mg/kg or mg/m^2^)** -- The prescribed dose rate. This is
   constant across all bins.
-- **Dose Range (mg)** -- The actual dose range for patients in this bin,
+- **Dose Range (mg)** -- The prescribed dose range for patients in this bin,
   calculated as Patient Range x Dose Rate.
-- **Vial Combination** -- Which vials are used. "NxSIZEmg" denotes fully
-  consumed vials. "+ open NxSIZEmg" denotes the final partially-used vial.
-- **N Vials** -- Total number of vials opened for one administration.
-- **Total Vial (mg)** -- Total drug content across all opened vials. This is
-  always >= the dose administered.
-- **Waste (mg)** -- Drug discarded from partially-used vials
-  (Total Vial mg - dose administered).
-- **Drug Cost** -- Acquisition cost for one administration in this bin.
-- **Weighted Cost** -- Drug Cost x Probability. The sum of Weighted Cost across
-  all bins equals the distribution-averaged cost.
+- **Units** group: *Unit Combination* (for example "1x120mg + 1x100mg") and
+  *N Units*, the number of vials for one administration.
+- **Drug in Units (mg)** -- Total drug in those vials. In a bin where the dose
+  is rounded down, this is the rounded dose, below the prescribed dose.
+- **Left Over (mg)** -- Drug in the vials minus the dose given, across the bin
+  (0 where the dose is rounded down).
+- **Rounded Down (mg)** -- Prescribed dose minus the dose given, across the
+  bin. It is non-zero only where the dose is rounded down, and never exceeds
+  `max_dose_rounding` times the prescribed dose.
+- **Cost** group: *Drug Cost* for one administration in this bin, and
+  *Weighted Cost* = Drug Cost x Probability. The sum of Weighted Cost across all
+  bins equals the distribution-averaged cost.
 
 The **footer** shows the expected (distribution-averaged) cost, drug name, dose
-basis, and distribution parameters (mean +/- SD).
+basis, and distribution parameters (mean +/- SD), then the available units with
+their prices and the `max_dose_rounding` setting, so each bin's choice can be
+checked.
 
 ```{r iv-dosing-diag}
 dosing_diag <- diagnose_dosing(reg_dist)
 as_flextable(dosing_diag)
 ```
 
-**Verify:** Find the bin containing the mean patient value (70 kg) and confirm
-it matches the point-estimate cost from the fixed-weight example. Check that
+**Verify:** The bin containing the mean patient value (70 kg) shows the
+point-estimate cost from the fixed-weight example, \$2,414. Check that
 probabilities sum to ~1.0. Confirm that the sum of the Weighted Cost column
 equals the Expected Cost shown in the footer.
 
@@ -401,7 +418,7 @@ equals the Expected Cost shown in the footer.
 BSA-based IV dosing works identically to weight-based dosing, but the patient
 parameter is BSA in m^2^ instead of weight in kg. Here a drug is dosed at
 375 mg/m^2^ with BSA = 1.8 m^2^, BSA SD = 0.2, vial sizes 100 and 500 mg,
-and a 10% wastage threshold (a rituximab-like schedule).
+and dose rounding of up to 10% (a rituximab-like schedule).
 
 The cost table:
 
@@ -416,10 +433,11 @@ reg_bsa <- define_regimen(
   med_cycle_length = 7,
   admin_days = 1,
   max_med_cycles = 4,
-  vial_sizes = c(100, 500),
-  vial_cost = c(174.63, 873.15),
-  wastage_threshold = 0.1,
-  admin_cost = 0
+  unit_size = c(100, 500),
+  unit_cost = c(174.63, 873.15),
+  exact = FALSE,
+  max_dose_rounding = 0.1,
+  charge_timing = "per_admin"
 )
 
 costs_bsa <- calculate_med_costs(
@@ -439,19 +457,19 @@ as_flextable(diagnose_dosing(reg_bsa))
 ```
 
 **Verify:** Mean dose = 375 x 1.8 = 675 mg. With `patient_bsa_sd = 0.2`,
-costs are distribution-averaged across dose bins. Confirm only 4 doses are
-given across the 4-week period (max_med_cycles = 4).
+costs are distribution-averaged across dose bins: \$1,148.17 per
+administration. One dose is given in each of the 4 weekly cycles
+(`max_med_cycles = 4`).
 
 ## 5. Costing SC and IM Drugs
 
-Setting `route = "sc"` (subcutaneous) or `route = "im"` (intramuscular) uses
-the same vial-based costing logic as IV. All three are `VIAL_ROUTES` in the
-package.
+Setting `route = "sc"` (subcutaneous) or `route = "im"` (intramuscular) labels
+the regimen; costing is the same as for IV.
 
 Here a drug is dosed at 1.3 mg/m^2^ SC with 1 mg and 2 mg vials on days 1, 4,
 8, and 11 of a 21-day cycle (a bortezomib-like schedule). Using two small vial
 sizes means the optimal vial combination changes across the BSA distribution,
-producing multiple dose bins. First, the vial breakdown:
+producing multiple dose bins. First, the vial breakdown at the mean:
 
 ```{r sc-define}
 reg_sc <- define_regimen(
@@ -463,9 +481,11 @@ reg_sc <- define_regimen(
   patient_bsa_sd = 0.2,
   med_cycle_length = 21,
   admin_days = c(1, 4, 8, 11),
-  vial_sizes = c(1, 2),
-  vial_cost = c(218, 436),
-  wastage_threshold = 0.1
+  unit_size = c(1, 2),
+  unit_cost = c(218, 436),
+  exact = FALSE,
+  max_dose_rounding = 0.1,
+  charge_timing = "per_admin"
 )
 
 summarise_regimen(reg_sc)
@@ -477,16 +497,18 @@ The cycle-by-cycle costs:
 costs_sc <- calculate_med_costs(
   reg_sc,
   model_cycle_length = 21,
-  n_cycles = 8,
-  subcycle_precision = TRUE
+  n_cycles = 8
 )
 
 as_flextable(costs_sc)
 ```
 
-**Verify:** Mean dose = 1.3 x 1.8 = 2.34 mg. With 1 mg and 2 mg vials, the
-vial combination varies across the BSA distribution — smaller patients need
-fewer vials than larger patients. The SC route is costed identically to IV.
+**Verify:** Mean dose = 1.3 x 1.8 = 2.34 mg. With 1 mg and 2 mg vials the
+combination varies across the BSA distribution: smaller patients need fewer
+vials than larger patients. Doses just above 2 mg or 3 mg (up to 2.22 mg and
+3.33 mg) are rounded down to 2 mg or 3 mg, because the shortfall is within 10%
+of the dose. The expected cost is \$579.88 per administration, or \$2,319.50 per
+21-day cycle (4 administrations).
 
 The dosing diagnostic for the SC drug shows multiple dose bins:
 
@@ -497,56 +519,41 @@ as_flextable(diagnose_dosing(reg_sc))
 ## 6. Assigning Regimen Costs to Model Cycles
 
 When the medication cycle length (`med_cycle_length`) differs from the model
-cycle length (`model_cycle_length`), administration events don't land evenly
-across model cycles. The package offers two ways to handle this:
+cycle length (`model_cycle_length`), administrations don't land evenly across
+model cycles. The package builds a day-level timeline of every administration
+and dispensing, and adds each one to the model cycle whose days contain it, so
+counts are exact whatever the cycle lengths.
 
-- **Default (analytic):** An approximation that counts events per model cycle.
-  Exact when cycles align; may accumulate small rounding errors when they
-  don't.
-- **`subcycle_precision = TRUE`:** Builds a full day-level timeline for exact
-  event counting. Always precise.
+Here is a 21-day medication cycle with IV dosing on days 1, 4, 8, and 11,
+mapped onto 30-day model cycles. Because the administration days are sparse and
+unevenly spaced, different model cycles capture different numbers of doses:
 
-Here is a 21-day medication cycle with IV dosing on days 1, 4, 8, and
-11, mapped onto 30-day model cycles. Because the administration days
-are sparse and unevenly spaced, different model cycles capture
-different numbers of doses — making the contrast between the two
-methods clear:
-
-```{r subcycle-precision-demo}
+```{r cycle-assignment-demo}
 reg_demo <- define_regimen(
   name = "IV Drug (demo)",
   route = "iv",
   dose_per_admin = 200,
-  vial_sizes = 100,
-  vial_cost = 2630,
+  unit_size = 100,
+  unit_cost = 2630,
+  exact = FALSE,
+  charge_timing = "per_admin",
   med_cycle_length = 21,
   admin_days = c(1, 4, 8, 11),
   admin_cost = 241
 )
 
-# Analytic approximation (default)
-costs_approx <- calculate_med_costs(
+costs_demo <- calculate_med_costs(
   reg_demo,
   model_cycle_length = 30,
   n_cycles = 12
 )
 
-as_flextable(costs_approx)
+as_flextable(costs_demo)
 ```
 
-```{r subcycle-precision-exact}
-# Exact subcycle precision
-costs_exact <- calculate_med_costs(
-  reg_demo,
-  model_cycle_length = 30,
-  n_cycles = 12,
-  subcycle_precision = TRUE
-)
-
-as_flextable(costs_exact)
-```
-
-**Verify:** Both tables span 360 days (12 x 30). The analytic method
-assigns a uniform fractional administration count per cycle. Subcycle
-precision shows exact integer counts that vary across cycles depending
-on which administration days fall within each model cycle window.
+**Verify:** The table spans 360 days (12 x 30). Each administration costs
+\$5,260 in drug and \$241 in fees. Model cycle 1 (days 0--29) contains
+administrations on days 0, 3, 7, 10, 21, 24 and 28: 7 administrations, \$36,820
+in drug cost and \$1,687 in admin cost. Later cycles hold 4 to 7
+administrations, depending on which administration days fall within each
+30-day window. Use `detail_schedule()` to list every event.

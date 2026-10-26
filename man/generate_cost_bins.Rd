@@ -2,32 +2,31 @@
 % Please edit documentation in R/cost_single.R
 \name{generate_cost_bins}
 \alias{generate_cost_bins}
-\title{Generate cost-based bins from a lognormal distribution of patient values}
+\title{Generate cost bins over a lognormal distribution of patient values}
 \usage{
-generate_cost_bins(reg, mean_val, sd_val, include_packing = FALSE)
+generate_cost_bins(reg, mean_val, sd_val, details = FALSE)
 }
 \arguments{
-\item{reg}{A med_regimen object.}
+\item{reg}{A med_regimen object (not exact, not no_wastage).}
 
-\item{mean_val}{Numeric. Mean of the patient parameter (weight or BSA).}
+\item{mean_val}{Mean of the patient parameter (natural scale).}
 
-\item{sd_val}{Numeric. Standard deviation.}
+\item{sd_val}{Standard deviation of the patient parameter.}
 
-\item{include_packing}{Logical. If TRUE, compute per-bin packing detail
-via \code{cost_iv_single()} instead of \code{cost_single_dose_vec()}.
-Only supported for vial-based routes.}
+\item{details}{Logical. If TRUE, attach the per-bin unit detail (from
+\code{cost_dose_detail()}) as attribute \code{"details"}.}
 }
 \value{
-Data frame with columns: bin, dose_lo, dose_hi, cost, probability.
-When \code{include_packing = TRUE}, additional columns are returned
-(param_lo, param_hi, midpoint, n_vials, waste_mg, mg_administered,
-weighted_cost) and attributes \code{"packing_results"},
-\code{"expected_cost"}, \code{"dose_per_admin"}.
+A data.frame with one row per bin: bin, param_lo, param_hi,
+dose_lo, dose_hi, cost, probability; with \code{details = TRUE}, the
+per-bin unit detail in attribute \code{"details"}.
 }
 \description{
-Identifies natural breakpoints where the cost function changes (vial/tablet
-boundaries), then computes lognormal probabilities for each cost interval.
-Users supply natural-scale mean+SD; conversion to lognormal parameters is
-handled internally.
+The cost of a dose only changes where the dose crosses an amount the units
+fill exactly, or (with rounding) where the shortfall to the nearest such
+amount reaches \code{max_dose_rounding} times the dose (dose = amount /
+(1 - max_dose_rounding)). Between these breakpoints the cost is constant,
+so each bin is costed at its midpoint and weighted by its lognormal
+probability.
 }
 \keyword{internal}

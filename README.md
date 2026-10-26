@@ -7,20 +7,27 @@
 
 [![CircleCI build
 status](https://circleci.com/gh/PolicyAnalysisInc/openqalyregimen.svg?style=svg)](https://app.circleci.com/pipelines/github/PolicyAnalysisInc/openqalyregimen)
-[![codecov](https://codecov.io/gh/PolicyAnalysisInc/openqalyregimen/graph/badge.svg?token=yFUlHZSVe4)](https://codecov.io/gh/PolicyAnalysisInc/openqalyregimen)<!-- badges: end -->
+[![codecov](https://codecov.io/gh/PolicyAnalysisInc/openqalyregimen/graph/badge.svg?token=yFUlHZSVe4)](https://app.codecov.io/gh/PolicyAnalysisInc/openqalyregimen)<!-- badges: end -->
 
 ## Overview
 
 The openqalyregimen package provides a declarative interface for
 defining treatment regimens and calculating medication costs. It handles
-a wide range of cases including: - Dosing per patient, per m2 of BSA, or
-per kg of weight - Oral medications with dispensing costs and oral
-wastage - IV and injection medications with administration costs, vials
-wastage, dose rounding - Handling of loading doses, dose escalation, and
-sequencing - Correctly attributes all costs to the model cycle schedule,
-even when medication cycles do not align with model cycles - Extensive
-debugging output to ensure transparency - Out of the box compatability
-with openqaly models, but can also be used independently
+a wide range of cases including:
+
+- Dosing per patient, per m2 of BSA, or per kg of weight, with optional
+  averaging over a patient distribution of BSA or weight
+- One costing model for every product (tablets, vials and other units):
+  the cheapest units covering the dose, exact whole-unit doses, dose
+  rounding against the prescribed dose, or a no-wastage scenario
+- Drug cost recorded per administration or per dispensing, with separate
+  administration and dispensing fees
+- Handling of loading doses, dose escalation, and sequencing
+- Correctly attributes all costs to the model cycle schedule, even when
+  medication cycles do not align with model cycles
+- Extensive debugging output to ensure transparency
+- Out of the box compatability with openqaly models, but can also be
+  used independently
 
 ## Installation
 
@@ -44,9 +51,11 @@ reg <- define_regimen(
   med_cycle_length = 21,
   admin_days = 1:14,
   max_med_cycles = 4,
-  available_strengths = c(150, 500),
+  unit_size = c(150, 500),
   unit_cost = 2.21,
-  admin_cost = 45
+  exact = FALSE,
+  charge_timing = "per_dispensing",
+  dispensing_cost = 45
 )
 
 calculate_med_costs(
@@ -54,23 +63,32 @@ calculate_med_costs(
   model_cycle_length = 21,
   n_cycles = 4
 )
-#>   cycle cycle_start_day cycle_end_day n_dispensing_events n_tablets_dispensed
-#> 1     1               0            21                   1                 112
-#> 2     2              21            42                   1                 112
-#> 3     3              42            63                   1                 112
-#> 4     4              63            84                   1                 112
-#>   drug_cost admin_cost total_cost
-#> 1  275.3655         45   320.3655
-#> 2  275.3655         45   320.3655
-#> 3  275.3655         45   320.3655
-#> 4  275.3655         45   320.3655
+#>   cycle cycle_start_day cycle_end_day n_administrations n_dispensings drug_cost
+#> 1     1               0            21                14             1  238.2382
+#> 2     2              21            42                14             1  238.2382
+#> 3     3              42            63                14             1  238.2382
+#> 4     4              63            84                14             1  238.2382
+#>   admin_cost dispensing_cost total_cost
+#> 1          0              45   283.2382
+#> 2          0              45   283.2382
+#> 3          0              45   283.2382
+#> 4          0              45   283.2382
 ```
+
+Because the dose is averaged over a BSA distribution, this example uses
+`exact = FALSE`: for each BSA the cheapest tablets covering the dose are
+costed. Exact whole-tablet dosing (`exact = TRUE`) needs a fixed dose.
 
 ## Learn more
 
 The package vignettes cover:
 
--   Oral regimens
--   IV and injection regimens
--   Combinations, loading doses, and phase changes
--   Use inside an `openqaly` model
+- Oral regimens
+- IV and injection regimens
+- Combinations, loading doses, and phase changes
+- Use inside an `openqaly` model
+
+## License
+
+Copyright (C) 2026 Avalere Health. Licensed under the GNU General Public
+License v3.0; see `LICENSE.md`.

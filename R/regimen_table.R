@@ -49,20 +49,21 @@ define_regimen_table <- function(x, shared_admin = NULL, ...) {
 #' \code{openqaly} model.
 #'
 #' @param x A \code{med_regimen} or \code{med_regimen_combo}.
-#' @param type One of \code{"medication"}, \code{"administration"}, or
+#' @param type One of \code{"medication"} (drug cost), \code{"administration"}
+#'   (\code{admin_cost}), \code{"dispensing"} (\code{dispensing_cost}), or
 #'   \code{"total"}.
-#' @param model_cycle_length Numeric model cycle length in days.
-#' @param n_cycles Integer number of model cycles.
+#' @param model_cycle_length Numeric model cycle length in days. In an
+#'   \code{openqaly} formula, pass \code{cycle_length_days}.
+#' @param n_cycles Integer number of model cycles. In an \code{openqaly}
+#'   formula, pass \code{max(cycle)}.
 #' @param cycle_times Optional numeric vector of cycle start times.
 #' @param shared_admin Optional override for combination admin sharing.
-#' @param subcycle_precision Logical. Passed to \code{calculate_med_costs()}.
-#' @param simple_daily_cost Logical. Passed to \code{calculate_med_costs()}.
 #' @param time Optional numeric vector of day values used to expand the
-#'   cost vector. When supplied, day values are converted to cycle indices
-#'   via \code{round(time / model_cycle_length)} and the returned vector
-#'   has \code{length(time)} elements obtained by indexing into the
-#'   per-cycle cost vector. Indices outside the valid range (less than 1
-#'   or greater than \code{n_cycles}) are mapped to zero. This is useful
+#'   cost vector. Each value is the end of a model cycle (as openqaly's
+#'   \code{day} = cycle x cycle length) and is mapped to the cycle whose
+#'   interval (start, end] contains it, using \code{cycle_times} when
+#'   given. The returned vector has \code{length(time)} elements; values
+#'   outside every cycle are mapped to zero. This is useful
 #'   when a model namespace has more rows than cycles (e.g. tunnel states)
 #'   and the cost vector must match \code{nrow(ns$df)}.
 #'
@@ -71,13 +72,11 @@ define_regimen_table <- function(x, shared_admin = NULL, ...) {
 #' @export
 calculate_regimen_cost <- function(
     x,
-    type = c("medication", "administration", "total"),
-    model_cycle_length = cycle_length_days,
-    n_cycles = max(cycle),
+    type = c("medication", "administration", "dispensing", "total"),
+    model_cycle_length,
+    n_cycles,
     cycle_times = NULL,
     shared_admin = NULL,
-    subcycle_precision = FALSE,
-    simple_daily_cost = FALSE,
     time = NULL
 ) {
     type <- match.arg(type)
@@ -104,8 +103,6 @@ calculate_regimen_cost <- function(
                 model_cycle_length = model_cycle_length,
                 n_cycles = as.integer(n_cycles),
                 cycle_times = cycle_times,
-                subcycle_precision = subcycle_precision,
-                simple_daily_cost = simple_daily_cost,
                 shared_admin = effective_shared_admin
             )
         )
@@ -113,28 +110,32 @@ calculate_regimen_cost <- function(
 
     if (type == "total") {
         cost_vector <- costs$total_cost
-    } else if (type == "medication") {
-        if ("drug_cost" %in% names(costs)) {
-            cost_vector <- costs$drug_cost
-        } else {
-            drug_cols <- grep("_drug_cost$", names(costs), value = TRUE)
-            cost_vector <- rowSums(costs[, drug_cols, drop = FALSE])
-        }
     } else {
-        if ("admin_cost" %in% names(costs)) {
-            cost_vector <- costs$admin_cost
+        col <- switch(type, medication = "drug_cost",
+                      administration = "admin_cost",
+                      dispensing = "dispensing_cost")
+        if (col %in% names(costs)) {
+            cost_vector <- costs[[col]]
         } else {
-            admin_cols <- grep("_admin_cost$", names(costs), value = TRUE)
-            admin_cols <- admin_cols[!grepl("_pre_sharing_admin_cost$", admin_cols)]
-            cost_vector <- rowSums(costs[, admin_cols, drop = FALSE])
+            cols <- grep(paste0("_", col, "$"), names(costs), value = TRUE)
+            cols <- cols[!grepl("_pre_sharing_", cols)]
+            cost_vector <- rowSums(costs[, cols, drop = FALSE])
         }
     }
 
     if (!is.null(time)) {
-        time_idx <- as.integer(round(as.numeric(time) / model_cycle_length))
-        expanded <- numeric(length(time_idx))
-        valid <- time_idx >= 1L & time_idx <= length(cost_vector)
-        expanded[valid] <- cost_vector[time_idx[valid]]
+        # A time is the end of a model cycle (openqaly's day = cycle x cycle
+        # length): it belongs to the cycle whose interval (start, end]
+        # contains it.
+        cyc <- resolve_cycles(as.integer(n_cycles), model_cycle_length,
+                              cycle_times)
+        t <- as.numeric(time)
+        eps <- 1e-9 * pmax(1, abs(t))
+        idx <- findInterval(t - eps, cyc$cycle_starts)
+        ok <- idx >= 1L & idx <= length(cost_vector)
+        ok[ok] <- t[ok] <= cyc$cycle_ends[idx[ok]] + eps[ok]
+        expanded <- numeric(length(t))
+        expanded[ok] <- cost_vector[idx[ok]]
         return(expanded)
     }
     cost_vector
@@ -190,17 +191,14 @@ normalize_regimen_table_row <- function(row, row_index) {
     optional_map <- list(
         max_cycles = "max_med_cycles",
         start_day = "start_day",
+        unit_size = "unit_size",
         unit_cost = "unit_cost",
-        units_per_pack = "units_per_pack",
-        tablet_strength = "tablet_strength",
-        available_strengths = "available_strengths",
-        oral_wastage = "oral_wastage",
-        vial_size = "vial_size",
-        vial_sizes = "vial_sizes",
-        vial_cost = "vial_cost",
-        wastage_threshold = "wastage_threshold",
+        exact = "exact",
+        max_dose_rounding = "max_dose_rounding",
+        no_wastage = "no_wastage",
+        charge_timing = "charge_timing",
         admin_cost = "admin_cost",
-        cost_per_day = "cost_per_day"
+        dispensing_cost = "dispensing_cost"
     )
 
     for (col_name in names(optional_map)) {
@@ -210,10 +208,11 @@ normalize_regimen_table_row <- function(row, row_index) {
 
         parsed <- switch(
             col_name,
-            available_strengths = parse_numeric_csv(value, col_name, row_index),
-            vial_sizes = parse_numeric_csv(value, col_name, row_index),
-            vial_cost = parse_numeric_csv(value, col_name, row_index),
-            oral_wastage = parse_regimen_logical(value, col_name, row_index),
+            unit_size = parse_numeric_csv(value, col_name, row_index),
+            unit_cost = parse_numeric_csv(value, col_name, row_index),
+            exact = parse_regimen_logical(value, col_name, row_index),
+            no_wastage = parse_regimen_logical(value, col_name, row_index),
+            charge_timing = as.character(value),
             as.numeric(value)
         )
 
@@ -260,6 +259,9 @@ parse_regimen_logical <- function(x, col_name, row_index) {
 
 parse_admin_days_spec <- function(x, row_index = NULL) {
     if (is.numeric(x)) {
+        if (any(is.na(x)) || any(x != round(x))) {
+            stop_admin_days_parse(as.character(x)[1], row_index)
+        }
         days <- as.integer(x)
     } else {
         spec <- trimws(as.character(x)[1])

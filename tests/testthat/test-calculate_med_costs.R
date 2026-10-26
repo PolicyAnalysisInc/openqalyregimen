@@ -1,1133 +1,449 @@
-test_that("calculate_med_costs errors on empty call", {
+# One 100 mg unit at $500 per dose unless overridden.
+reg_iv <- function(...) {
+  args <- list(name = "Drug A", dose_per_admin = 100, unit_size = 100,
+               unit_cost = 500, med_cycle_length = 21, admin_days = 1L,
+               exact = FALSE, charge_timing = "per_admin")
+  over <- list(...)
+  args[names(over)] <- over
+  do.call(define_regimen, args)
+}
+
+# Tablets: 3,600 mg/day from 150/500 mg tablets ($22.10/day), 14 of 21 days.
+reg_oral <- function(...) {
+  args <- list(name = "Cape", route = "oral", dose_per_admin = 3600,
+               unit_size = c(150, 500), unit_cost = 2.21,
+               med_cycle_length = 21, admin_days = 1:14, exact = TRUE,
+               charge_timing = "per_dispensing")
+  over <- list(...)
+  args[names(over)] <- over
+  do.call(define_regimen, args)
+}
+
+# ===========================================================================
+# Basics
+# ===========================================================================
+
+test_that("calculate_med_costs errors on empty call or non-regimen input", {
   expect_error(calculate_med_costs(), "At least one")
-})
-
-test_that("calculate_med_costs errors on non-med_regimen input", {
   expect_error(calculate_med_costs(list(a = 1)), "med_regimen")
+  expect_error(calculate_med_costs(reg_iv(), "x"), "med_regimen")
 })
 
-test_that("calculate_med_costs returns a data.frame", {
-  reg <- define_regimen(admin_days = 1L, vial_size = 100, vial_cost = 500,
-    admin_cost = 150)
-  out <- calculate_med_costs(reg)
-  expect_s3_class(out, "data.frame")
+test_that("single regimen returns one row per model cycle with expected columns", {
+  res <- calculate_med_costs(reg_iv(), model_cycle_length = 7, n_cycles = 10)
+  expect_s3_class(res, "regimen_costs")
+  expect_equal(nrow(res), 10)
+  expect_equal(names(res), c("cycle", "cycle_start_day", "cycle_end_day",
+                             "n_administrations", "n_dispensings",
+                             "drug_cost", "admin_cost", "dispensing_cost",
+                             "total_cost"))
 })
 
-test_that("calculate_med_costs row count equals n_cycles", {
-  reg <- define_regimen(admin_days = 1L, vial_size = 100, vial_cost = 500)
-  out <- calculate_med_costs(reg, n_cycles = 10)
-  expect_equal(nrow(out), 10)
+test_that("cycle_times overrides n_cycles", {
+  res <- calculate_med_costs(reg_iv(), cycle_times = c(0, 7, 14, 21, 28))
+  expect_equal(nrow(res), 5)
 })
 
-test_that("cycle_times overrides n_cycles for row count", {
-  reg <- define_regimen(admin_days = 1L, vial_size = 100, vial_cost = 500)
-  out <- calculate_med_costs(reg,
-    cycle_times = c(0, 7, 14, 21, 28))
-  expect_equal(nrow(out), 5)
+test_that("total_cost = drug + admin + dispensing", {
+  res <- calculate_med_costs(reg_oral(admin_cost = 3, dispensing_cost = 45),
+                             model_cycle_length = 7, n_cycles = 12)
+  expect_equal(res$total_cost,
+               res$drug_cost + res$admin_cost + res$dispensing_cost)
 })
 
-test_that("total_cost equals drug_cost + admin_cost for per-admin path", {
-  reg <- define_regimen(admin_days = 1L, vial_size = 100, vial_cost = 500,
-    admin_cost = 150)
-  out <- calculate_med_costs(reg, n_cycles = 5)
-  expect_equal(out$total_cost, out$drug_cost + out$admin_cost)
+test_that("single model cycle works", {
+  res <- calculate_med_costs(reg_iv(), model_cycle_length = 21, n_cycles = 1)
+  expect_equal(res$drug_cost, 500)
 })
 
 # ===========================================================================
-# Simple daily cost mode
+# Schedule
 # ===========================================================================
 
-test_that("simple daily cost: cost_per_day * model_cycle_length gives correct cost", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "iv",
-    cost_per_day = 100
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 4, simple_daily_cost = TRUE)
-  expect_equal(out$drug_cost, rep(700, 4))
-  expect_equal(out$total_cost, rep(700, 4))
+test_that("aligned cycles: one administration per model cycle", {
+  res <- calculate_med_costs(reg_iv(med_cycle_length = 7),
+                             model_cycle_length = 7, n_cycles = 6)
+  expect_equal(res$n_administrations, rep(1L, 6))
+  expect_equal(res$drug_cost, rep(500, 6))
 })
 
-test_that("simple daily cost: admin_cost distributed evenly across cycle", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "oral",
-    cost_per_day = 5,
-    admin_cost = 28,
-    med_cycle_length = 28
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 28,
-    n_cycles = 4, simple_daily_cost = TRUE)
-  # admin_cost = 28 / 28 days = 1/day, so 28-day cycle = 28
-  expect_equal(out$admin_cost, rep(28, 4))
-  expect_equal(out$drug_cost, rep(5 * 28, 4))
-  expect_equal(out$total_cost, out$drug_cost + out$admin_cost)
+test_that("medication cycle longer than model cycle", {
+  res <- calculate_med_costs(reg_iv(), model_cycle_length = 7, n_cycles = 9)
+  expect_equal(res$n_administrations, rep(c(1L, 0L, 0L), 3))
+  expect_equal(res$drug_cost, rep(c(500, 0, 0), 3))
 })
 
-test_that("simple daily cost: admin_cost zeroed before start_day and beyond max_med_cycles", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "oral",
-    cost_per_day = 10,
-    admin_cost = 14,
-    med_cycle_length = 7,
-    start_day = 7,
-    max_med_cycles = 2
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 5, simple_daily_cost = TRUE)
-  # Cycle 1 (days 0-6): before start_day => 0
-  expect_equal(out$admin_cost[1], 0)
-  # Cycles 2-3 (days 7-20): active => 14 each
-  expect_equal(out$admin_cost[2], 14)
-  expect_equal(out$admin_cost[3], 14)
-  # Cycles 4-5 (days 21+): beyond max_med_cycles => 0
-  expect_equal(out$admin_cost[4], 0)
-  expect_equal(out$admin_cost[5], 0)
+test_that("model cycle longer than medication cycle", {
+  res <- calculate_med_costs(reg_iv(med_cycle_length = 7),
+                             model_cycle_length = 28, n_cycles = 3)
+  expect_equal(res$n_administrations, rep(4L, 3))
+  expect_equal(res$drug_cost, rep(2000, 3))
 })
 
-test_that("simple daily cost: max_med_cycles zeroes out costs beyond cap", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "iv",
-    cost_per_day = 100,
-    max_med_cycles = 2,
-    med_cycle_length = 7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 4, simple_daily_cost = TRUE)
-  expect_equal(out$drug_cost[3:4], c(0, 0))
-  expect_equal(out$total_cost[3:4], c(0, 0))
+test_that("misaligned cycles count each administration once", {
+  # 21-day medication cycle, days 1 and 8; 10-day model cycles.
+  reg <- reg_iv(admin_days = c(1L, 8L))
+  res <- calculate_med_costs(reg, model_cycle_length = 10, n_cycles = 9)
+  # Administration days: 0, 7, 21, 28, 42, 49, 63, 70, 84 (horizon 90)
+  admin <- c(0, 7, 21, 28, 42, 49, 63, 70, 84)
+  expect_equal(res$n_administrations,
+               as.integer(tabulate(floor(admin / 10) + 1, nbins = 9)))
+  expect_equal(sum(res$n_administrations), 9L)
 })
 
-test_that("simple daily cost: no n_administrations column", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "iv",
-    cost_per_day = 100
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 2, simple_daily_cost = TRUE)
-  expect_false("n_administrations" %in% names(out))
+test_that("max_med_cycles stops treatment", {
+  res <- calculate_med_costs(reg_iv(max_med_cycles = 2),
+                             model_cycle_length = 21, n_cycles = 5)
+  expect_equal(res$n_administrations, c(1L, 1L, 0L, 0L, 0L))
+  expect_equal(res$drug_cost, c(500, 500, 0, 0, 0))
 })
 
+test_that("start_day shifts treatment; cycles before it are zero", {
+  res <- calculate_med_costs(reg_iv(start_day = 42),
+                             model_cycle_length = 21, n_cycles = 5)
+  expect_equal(res$n_administrations, c(0L, 0L, 1L, 1L, 1L))
+})
+
+test_that("start_day + max_med_cycles limits the treatment window", {
+  res <- calculate_med_costs(reg_iv(start_day = 21, max_med_cycles = 2),
+                             model_cycle_length = 21, n_cycles = 5)
+  expect_equal(res$n_administrations, c(0L, 1L, 1L, 0L, 0L))
+})
+
+test_that("start_day = 0 is the default", {
+  expect_equal(calculate_med_costs(reg_iv(), n_cycles = 10),
+               calculate_med_costs(reg_iv(start_day = 0), n_cycles = 10))
+})
+
+test_that("non-uniform cycle_times: boundaries and counts", {
+  res <- calculate_med_costs(reg_iv(med_cycle_length = 7),
+                             cycle_times = c(0, 7, 21, 28))
+  expect_equal(res$cycle_end_day, c(7, 21, 28, 35))
+  expect_equal(res$n_administrations, c(1L, 2L, 1L, 1L))
+})
 
 # ===========================================================================
-# Oral wastage path
+# Charge timing
 # ===========================================================================
 
-test_that("oral wastage: dispensing counts match analytic formula", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "oral",
-    dose_per_admin = 100,
-    tablet_strength = 100,
-    unit_cost = 10,
-    med_cycle_length = 21
-  )
-  # model_cycle=7, med_cycle=21: 3 model cycles per med cycle
-  out <- calculate_med_costs(reg, model_cycle_length = 7, n_cycles = 6)
-  # Dispensing at day 0 (cycle 1), day 21 (cycle 4)
-  expect_equal(out$n_dispensing_events[1], 1)
-  expect_equal(out$n_dispensing_events[4], 1)
-  expect_equal(out$n_dispensing_events[2], 0)
+test_that("per_admin puts each dose's cost on its administration day", {
+  res <- calculate_med_costs(reg_oral(charge_timing = "per_admin"),
+                             model_cycle_length = 7, n_cycles = 6)
+  expect_equal(res$drug_cost, rep(c(7, 7, 0), 2) * 22.10)
 })
 
-test_that("oral wastage: subcycle precision gives same totals on aligned cycles", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "oral",
-    dose_per_admin = 100,
-    tablet_strength = 100,
-    unit_cost = 10,
-    med_cycle_length = 21
-  )
-  out_analytic <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 6, subcycle_precision = FALSE)
-  out_precise  <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 6, subcycle_precision = TRUE)
-  expect_equal(sum(out_analytic$drug_cost), sum(out_precise$drug_cost))
+test_that("per_dispensing puts a whole cycle's doses on day 1", {
+  res <- calculate_med_costs(reg_oral(), model_cycle_length = 7, n_cycles = 6)
+  expect_equal(res$drug_cost, rep(c(14, 0, 0), 2) * 22.10)
+  # Administrations are still counted on the days they happen.
+  expect_equal(res$n_administrations, rep(c(7L, 7L, 0L), 2))
 })
 
-test_that("oral wastage: n_tablets_dispensed = n_dispensing_events * tabs_per_dispensing", {
-  reg <- define_regimen( 
-    route = "oral",
-    dose_per_admin = 100,
-    tablet_strength = 50,
-    unit_cost = 10,
-    med_cycle_length = 7,
-    admin_days = 1L
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7, n_cycles = 3)
-  # 100mg / 50mg = 2 tablets per admin, 1 admin per cycle => 2 tablets per dispensing
-  expect_equal(out$n_tablets_dispensed, out$n_dispensing_events * 2)
+test_that("both timings give the same total over whole medication cycles", {
+  a <- calculate_med_costs(reg_oral(charge_timing = "per_admin"),
+                           model_cycle_length = 7, n_cycles = 12)
+  d <- calculate_med_costs(reg_oral(), model_cycle_length = 7, n_cycles = 12)
+  expect_equal(sum(a$drug_cost), sum(d$drug_cost))
 })
 
-test_that("oral wastage: drug_cost = n_dispensing_events * dispensing_cost", {
-  reg <- define_regimen( 
-    route = "oral",
-    dose_per_admin = 100,
-    tablet_strength = 100,
-    unit_cost = 10,
-    med_cycle_length = 7,
-    admin_days = 1L
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7, n_cycles = 3)
-  # dispensing cost = 1 admin * $10 = $10
-  expected_drug_cost <- out$n_dispensing_events * 10
-  expect_equal(out$drug_cost, expected_drug_cost)
+test_that("per_dispensing charges the full cycle even if the model ends mid-cycle", {
+  res <- calculate_med_costs(reg_oral(), model_cycle_length = 7, n_cycles = 1)
+  expect_equal(res$drug_cost, 14 * 22.10)
+  res <- calculate_med_costs(reg_oral(charge_timing = "per_admin"),
+                             model_cycle_length = 7, n_cycles = 1)
+  expect_equal(res$drug_cost, 7 * 22.10)
 })
 
-test_that("oral wastage: treatment cap prevents dispensing beyond cap", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "oral",
-    dose_per_admin = 100,
-    tablet_strength = 100,
-    unit_cost = 10,
-    med_cycle_length = 7,
-    max_med_cycles = 1
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7, n_cycles = 4)
-  expect_equal(out$n_dispensing_events[1], 1)
-  expect_equal(sum(out$n_dispensing_events[2:4]), 0)
+test_that("per_dispensing respects start_day and max_med_cycles", {
+  res <- calculate_med_costs(reg_oral(start_day = 21, max_med_cycles = 1),
+                             model_cycle_length = 21, n_cycles = 4)
+  expect_equal(res$drug_cost, c(0, 14 * 22.10, 0, 0))
+  expect_equal(res$n_dispensings, c(0L, 1L, 0L, 0L))
 })
-
 
 # ===========================================================================
-# Per-admin path (IV / oral no-wastage)
+# Two fees
 # ===========================================================================
 
-test_that("per-admin: admin counts correct for aligned cycles", {
-  # med_cycle=21, model_cycle=21, 1 admin on day 1
-  reg <- define_regimen( 
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 21,
-    admin_days = 1L
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 21, n_cycles = 3)
-  expect_equal(out$n_administrations, c(1, 1, 1))
+test_that("admin_cost is charged on every administration", {
+  res <- calculate_med_costs(reg_oral(admin_cost = 3),
+                             model_cycle_length = 7, n_cycles = 6)
+  expect_equal(res$admin_cost, rep(c(21, 21, 0), 2))
 })
 
-test_that("per-admin: admin counts correct for misaligned cycles", {
-  # med_cycle=21 (admin day 1), model_cycle=7
-  # admins at days 0, 21, 42
-  # model cycles: [0,7), [7,14), [14,21), [21,28), ...
-  # day 0 -> cycle 1, day 21 -> cycle 4
-  reg <- define_regimen( 
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 21,
-    admin_days = 1L
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 6, subcycle_precision = TRUE)
-  expect_equal(out$n_administrations[1], 1)
-  expect_equal(out$n_administrations[2], 0)
-  expect_equal(out$n_administrations[4], 1)
+test_that("dispensing_cost is charged once per medication cycle", {
+  res <- calculate_med_costs(reg_oral(dispensing_cost = 45),
+                             model_cycle_length = 7, n_cycles = 6)
+  expect_equal(res$dispensing_cost, rep(c(45, 0, 0), 2))
+  expect_equal(res$n_dispensings, rep(c(1L, 0L, 0L), 2))
 })
 
-test_that("per-admin: subcycle precision matches analytic on aligned cycles", {
-  reg <- define_regimen( 
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 21,
-    admin_days = 1L
-  )
-  out_analytic <- calculate_med_costs(reg, model_cycle_length = 21,
-    n_cycles = 3, subcycle_precision = FALSE)
-  out_precise  <- calculate_med_costs(reg, model_cycle_length = 21,
-    n_cycles = 3, subcycle_precision = TRUE)
-  expect_equal(out_analytic$n_administrations, out_precise$n_administrations)
-  expect_equal(out_analytic$total_cost, out_precise$total_cost)
+test_that("fees don't depend on charge_timing", {
+  a <- calculate_med_costs(reg_oral(charge_timing = "per_admin", admin_cost = 3,
+                                    dispensing_cost = 45),
+                           model_cycle_length = 7, n_cycles = 6)
+  d <- calculate_med_costs(reg_oral(admin_cost = 3, dispensing_cost = 45),
+                           model_cycle_length = 7, n_cycles = 6)
+  expect_equal(a$admin_cost, d$admin_cost)
+  expect_equal(a$dispensing_cost, d$dispensing_cost)
 })
 
-test_that("per-admin: treatment cap zeroes out costs beyond cap", {
-  reg <- define_regimen(admin_days = 1L, 
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7,
-    max_med_cycles = 1
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 4, subcycle_precision = TRUE)
-  expect_equal(out$n_administrations[1], 1)
-  expect_equal(sum(out$n_administrations[2:4]), 0)
+test_that("an IV with both fees charges each on its own schedule", {
+  # Days 1, 8, 15 of a 21-day cycle: infusion fee each dose, pharmacy fee once.
+  reg <- reg_iv(admin_days = c(1L, 8L, 15L), admin_cost = 241,
+                dispensing_cost = 20)
+  res <- calculate_med_costs(reg, model_cycle_length = 21, n_cycles = 2)
+  expect_equal(res$admin_cost, c(723, 723))
+  expect_equal(res$dispensing_cost, c(20, 20))
 })
 
+test_that("fees stop with treatment", {
+  res <- calculate_med_costs(reg_oral(admin_cost = 3, dispensing_cost = 45,
+                                      max_med_cycles = 1),
+                             model_cycle_length = 21, n_cycles = 3)
+  expect_equal(res$admin_cost, c(42, 0, 0))
+  expect_equal(res$dispensing_cost, c(45, 0, 0))
+})
+
+# ===========================================================================
+# Distribution flows through
+# ===========================================================================
+
+test_that("distribution-averaged cost is used per administration", {
+  reg <- reg_iv(dose_per_admin = 5, dose_basis = "weight", patient_weight = 70,
+                patient_weight_sd = 15, unit_size = c(100, 400),
+                unit_cost = c(500, 1800), med_cycle_length = 7)
+  res <- calculate_med_costs(reg, model_cycle_length = 7, n_cycles = 3)
+  expect_equal(res$drug_cost, rep(cost_single_admin_drug(reg), 3))
+  point <- calculate_med_costs(reg_iv(dose_per_admin = 350,
+                                      unit_size = c(100, 400),
+                                      unit_cost = c(500, 1800),
+                                      med_cycle_length = 7),
+                               model_cycle_length = 7, n_cycles = 3)
+  expect_false(isTRUE(all.equal(res$drug_cost, point$drug_cost)))
+})
 
 # ===========================================================================
 # Daily detail
 # ===========================================================================
 
-test_that("daily detail: one row per day", {
-  reg <- define_regimen(admin_days = 1L, 
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 3, daily_detail = TRUE)
-  expect_equal(nrow(out), 21)
+test_that("daily detail: one row per day with expected columns", {
+  res <- calculate_med_costs(reg_iv(), model_cycle_length = 7, n_cycles = 4,
+                             daily_detail = TRUE)
+  expect_s3_class(res, "regimen_daily_detail")
+  expect_equal(nrow(res), 28)
+  expect_equal(names(res), c("day", "model_cycle", "med_cycle",
+                             "med_cycle_day", "doses_taken", "mg_taken",
+                             "units_dispensed", "mg_dispensed", "drug_cost",
+                             "admin_cost", "dispensing_cost", "total_cost"))
 })
 
-test_that("daily detail IV: has vials_used, mg_wasted, mg_from_vials columns", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "iv",
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 2, daily_detail = TRUE)
-  expect_true("vials_used" %in% names(out))
-  expect_true("mg_wasted" %in% names(out))
-  expect_true("mg_from_vials" %in% names(out))
+test_that("daily detail: aggregating by model cycle matches cycle results", {
+  reg <- reg_oral(admin_cost = 3, dispensing_cost = 45)
+  d <- calculate_med_costs(reg, model_cycle_length = 7, n_cycles = 9,
+                           daily_detail = TRUE)
+  res <- calculate_med_costs(reg, model_cycle_length = 7, n_cycles = 9)
+  for (col in c("drug_cost", "admin_cost", "dispensing_cost", "total_cost")) {
+    expect_equal(as.numeric(tapply(d[[col]], d$model_cycle, sum)), res[[col]])
+  }
 })
 
-test_that("daily detail oral no-wastage: no dispensing/waste columns", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "oral",
-    oral_wastage = FALSE,
-    dose_per_admin = 100,
-    tablet_strength = 50,
-    unit_cost = 10,
-    med_cycle_length = 7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 2, daily_detail = TRUE)
-  expect_false("tabs_taken" %in% names(out))
-  expect_false("mg_dispensed" %in% names(out))
-  expect_false("mg_wasted" %in% names(out))
-  expected_cols <- c("day", "model_cycle", "med_cycle", "med_cycle_day",
-    "doses_taken", "mg_taken", "drug_cost", "admin_cost", "total_cost")
-  expect_equal(names(out), expected_cols)
+test_that("daily detail per_dispensing: units and mg dispensed on day 1 only", {
+  d <- calculate_med_costs(reg_oral(), model_cycle_length = 7, n_cycles = 3,
+                           daily_detail = TRUE)
+  day1 <- d$med_cycle_day == 1
+  expect_equal(d$units_dispensed[day1], 14 * 10)
+  expect_equal(d$mg_dispensed[day1], 14 * 3600)
+  expect_true(all(d$units_dispensed[!day1] == 0))
+  expect_equal(sum(d$mg_taken), 14 * 3600)
 })
 
-test_that("daily detail oral wastage: is_dispensing TRUE only at med cycle starts", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "oral",
-    dose_per_admin = 100,
-    tablet_strength = 100,
-    unit_cost = 10,
-    med_cycle_length = 7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 3, daily_detail = TRUE)
-  disp_days <- out$day[out$doses_dispensed > 0]
-  # Med cycle starts at days 0, 7, 14
-  expect_equal(disp_days, c(0, 7, 14))
-})
-
-test_that("daily detail oral wastage: mg_dispensed shows full cycle amount on dispensing days only", {
-  reg <- define_regimen( 
-    route = "oral",
-    dose_per_admin = 60,
-    tablet_strength = 60,
-    unit_cost = 10,
-    med_cycle_length = 21,
-    admin_days = 1:7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 3, daily_detail = TRUE)
-  full_cycle_mg <- 60 * 7
-  disp_rows <- out[out$doses_dispensed > 0, ]
-  non_disp_rows <- out[out$doses_dispensed == 0, ]
-  expect_true(all(disp_rows$mg_dispensed == full_cycle_mg))
-  expect_true(all(non_disp_rows$mg_dispensed == 0))
-})
-
-test_that("daily detail: aggregating daily drug_cost by model_cycle matches non-daily", {
-  reg <- define_regimen(admin_days = 1L, 
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7
-  )
-  out_daily <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 3, daily_detail = TRUE)
-  out_cycle <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 3, subcycle_precision = TRUE)
-  daily_agg <- tapply(out_daily$drug_cost, out_daily$model_cycle, sum)
-  expect_equal(as.numeric(daily_agg), out_cycle$drug_cost)
+test_that("daily detail per_admin: units dispensed on administration days", {
+  d <- calculate_med_costs(reg_oral(charge_timing = "per_admin"),
+                           model_cycle_length = 7, n_cycles = 3,
+                           daily_detail = TRUE)
+  expect_equal(d$units_dispensed, d$doses_taken * 10)
 })
 
 test_that("daily detail: off-treatment days have zero costs and NA med_cycle", {
-  reg <- define_regimen(admin_days = 1L, 
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7,
-    max_med_cycles = 1
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 3, daily_detail = TRUE)
-  off_tx <- out[out$day >= 7, ]
-  expect_true(all(off_tx$drug_cost == 0))
-  expect_true(all(is.na(off_tx$med_cycle)))
+  d <- calculate_med_costs(reg_iv(start_day = 10, admin_cost = 5),
+                           model_cycle_length = 7, n_cycles = 3,
+                           daily_detail = TRUE)
+  pre <- d$day < 10
+  expect_true(all(is.na(d$med_cycle[pre])))
+  expect_true(all(d$total_cost[pre] == 0))
+  expect_equal(d$med_cycle_day[d$day == 10], 1)
 })
 
-
-# ===========================================================================
-# Oral no-wastage admin_cost: charged per dispensing, not per admin
-# ===========================================================================
-
-test_that("oral no-wastage: admin_cost charged once per med cycle, not per admin", {
-  reg <- define_regimen( 
-    route = "oral",
-    oral_wastage = FALSE,
-    dose_per_admin = 100,
-    tablet_strength = 100,
-    unit_cost = 10,
-    admin_cost = 25,
-    med_cycle_length = 28,
-    admin_days = 1:28
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 28,
-    n_cycles = 3, subcycle_precision = TRUE)
-  # One dispensing event per 28-day cycle = $25 admin cost, not 28 * $25
-  expect_equal(out$admin_cost, rep(25, 3))
+test_that("daily detail: mg_taken shows the dose given after rounding", {
+  reg <- reg_iv(dose_per_admin = 110, max_dose_rounding = 0.1,
+                med_cycle_length = 7)
+  d <- calculate_med_costs(reg, model_cycle_length = 7, n_cycles = 1,
+                           daily_detail = TRUE)
+  expect_equal(d$mg_taken[1], 100)
+  expect_equal(d$mg_dispensed[1], 100)
 })
 
-test_that("oral no-wastage analytic: admin_cost charged once per med cycle", {
-  reg <- define_regimen( 
-    route = "oral",
-    oral_wastage = FALSE,
-    dose_per_admin = 100,
-    tablet_strength = 100,
-    unit_cost = 10,
-    admin_cost = 25,
-    med_cycle_length = 28,
-    admin_days = 1:28
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 28,
-    n_cycles = 3, subcycle_precision = FALSE)
-  expect_equal(out$admin_cost, rep(25, 3))
+test_that("daily detail with a distribution omits dose and unit columns", {
+  reg <- reg_iv(dose_per_admin = 5, dose_basis = "weight", patient_weight = 70,
+                patient_weight_sd = 15, unit_size = c(100, 400),
+                unit_cost = c(500, 1800), med_cycle_length = 7)
+  d <- calculate_med_costs(reg, model_cycle_length = 7, n_cycles = 1,
+                           daily_detail = TRUE)
+  expect_false(any(c("mg_taken", "units_dispensed", "mg_dispensed") %in%
+                     names(d)))
+  expect_equal(d$drug_cost[1], cost_single_admin_drug(reg))
 })
 
-test_that("oral no-wastage daily: admin_cost non-zero only on day 1 of each med cycle", {
-  reg <- define_regimen( 
-    route = "oral",
-    oral_wastage = FALSE,
-    dose_per_admin = 100,
-    tablet_strength = 100,
-    unit_cost = 10,
-    admin_cost = 25,
-    med_cycle_length = 7,
-    admin_days = 1:7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 2, daily_detail = TRUE)
-  # Admin cost should only be non-zero on day 0 and day 7 (med cycle starts)
-  admin_days <- out$day[out$admin_cost > 0]
-  expect_equal(admin_days, c(0, 7))
-  expect_equal(out$admin_cost[out$day == 0], 25)
-  expect_equal(out$admin_cost[out$day == 1], 0)
+test_that("daily detail under no_wastage shows mg costed, not units", {
+  reg <- reg_oral(no_wastage = TRUE)
+  d <- calculate_med_costs(reg, model_cycle_length = 7, n_cycles = 1,
+                           daily_detail = TRUE)
+  expect_false("units_dispensed" %in% names(d))
+  expect_equal(d$mg_dispensed[1], 14 * 3600)
+  expect_equal(d$drug_cost[1], 14 * 3600 * 2.21 / 500)
 })
-
-test_that("oral no-wastage daily: total_cost = drug_cost + admin_cost per day", {
-  reg <- define_regimen( 
-    route = "oral",
-    oral_wastage = FALSE,
-    dose_per_admin = 100,
-    tablet_strength = 100,
-    unit_cost = 10,
-    admin_cost = 25,
-    med_cycle_length = 7,
-    admin_days = 1:7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 2, daily_detail = TRUE)
-  expect_equal(out$total_cost, out$drug_cost + out$admin_cost)
-})
-
-test_that("daily detail: no is_admin column in output", {
-  # IV
-  reg_iv <- define_regimen(admin_days = 1L, 
-    vial_size = 100, vial_cost = 500, med_cycle_length = 7
-  )
-  out_iv <- calculate_med_costs(reg_iv, model_cycle_length = 7,
-    n_cycles = 2, daily_detail = TRUE)
-  expect_false("is_admin" %in% names(out_iv))
-
-  # Oral wastage
-  reg_ow <- define_regimen(admin_days = 1L, 
-    route = "oral", dose_per_admin = 100,
-    tablet_strength = 100, unit_cost = 10, med_cycle_length = 7
-  )
-  out_ow <- calculate_med_costs(reg_ow, model_cycle_length = 7,
-    n_cycles = 2, daily_detail = TRUE)
-  expect_false("is_admin" %in% names(out_ow))
-
-  # Oral no-wastage
-  reg_onw <- define_regimen(admin_days = 1L, 
-    route = "oral", oral_wastage = FALSE, dose_per_admin = 100,
-    tablet_strength = 100, unit_cost = 10, med_cycle_length = 7
-  )
-  out_onw <- calculate_med_costs(reg_onw, model_cycle_length = 7,
-    n_cycles = 2, daily_detail = TRUE)
-  expect_false("is_admin" %in% names(out_onw))
-})
-
-
-# ===========================================================================
-# Cross-cutting
-# ===========================================================================
-
-test_that("daily_detail = TRUE forces subcycle_precision", {
-  reg <- define_regimen(admin_days = 1L, 
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7
-  )
-  # daily_detail=TRUE should work even without explicit subcycle_precision
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 2, daily_detail = TRUE)
-  expect_equal(nrow(out), 14)
-})
-
-test_that("single cycle edge case (n_cycles = 1)", {
-  reg <- define_regimen(admin_days = 1L, 
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7, n_cycles = 1)
-  expect_equal(nrow(out), 1)
-  expect_equal(out$n_administrations, 1)
-})
-
-test_that("med cycle longer than model cycle works correctly", {
-  reg <- define_regimen(admin_days = 1L, 
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 28
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 8, subcycle_precision = TRUE)
-  # Admin on day 0 (model cycle 1) and day 28 (model cycle 5)
-  expect_equal(out$n_administrations[1], 1)
-  expect_equal(out$n_administrations[5], 1)
-  expect_equal(sum(out$n_administrations), 2)
-})
-
-
-# ===========================================================================
-# Distribution-averaged cost integration
-# ===========================================================================
-
-test_that("distribution cost flows through calculate_med_costs and differs from point estimate", {
-  # Mean dose = 4 * 75 = 300mg, exactly at vial boundary
-  reg_dist <- define_regimen(admin_days = 1L, 
-    route = "iv",
-    dose_per_admin = 4,
-    dose_basis = "weight",
-    patient_weight = 75,
-    patient_weight_sd = 15,
-    vial_size = 100,
-    vial_cost = 500
-  )
-  out_dist <- calculate_med_costs(reg_dist, n_cycles = 3)
-
-  reg_point <- define_regimen(admin_days = 1L, 
-    route = "iv",
-    dose_per_admin = 4,
-    dose_basis = "weight",
-    patient_weight = 75,
-    vial_size = 100,
-    vial_cost = 500
-  )
-  out_point <- calculate_med_costs(reg_point, n_cycles = 3)
-
-  # Output structure should be the same
-  expect_equal(names(out_dist), names(out_point))
-  expect_equal(nrow(out_dist), nrow(out_point))
-
-  # Drug costs should differ due to distribution averaging
-  expect_false(all(out_dist$drug_cost == out_point$drug_cost))
-})
-
-
-# ===========================================================================
-# start_day parameter
-# ===========================================================================
-
-test_that("start_day = 0 is backward-compatible: identical to omitting it", {
-  reg_default <- define_regimen(admin_days = 1L, vial_size = 100, vial_cost = 500,
-    med_cycle_length = 7)
-  reg_zero <- define_regimen(admin_days = 1L, vial_size = 100, vial_cost = 500,
-    med_cycle_length = 7, start_day = 0)
-  out_default <- calculate_med_costs(reg_default, model_cycle_length = 7,
-    n_cycles = 4, subcycle_precision = TRUE)
-  out_zero <- calculate_med_costs(reg_zero, model_cycle_length = 7,
-    n_cycles = 4, subcycle_precision = TRUE)
-  expect_equal(out_default, out_zero)
-})
-
-test_that("per-admin: cycles before start_day get 0 admins", {
-  reg <- define_regimen(admin_days = 1L, 
-    vial_size = 100, vial_cost = 500,
-    med_cycle_length = 7, start_day = 14
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 6, subcycle_precision = TRUE)
-  # Cycles 1-2 (days 0-13) should have 0 admins
-  expect_equal(out$n_administrations[1], 0)
-  expect_equal(out$n_administrations[2], 0)
-  # Cycle 3 (days 14-20) should have first admin
-  expect_equal(out$n_administrations[3], 1)
-})
-
-test_that("per-admin analytic: start_day shifts admin counts", {
-  reg <- define_regimen(admin_days = 1L, 
-    vial_size = 100, vial_cost = 500,
-    med_cycle_length = 7, start_day = 14
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 6, subcycle_precision = FALSE)
-  expect_equal(out$n_administrations[1], 0)
-  expect_equal(out$n_administrations[2], 0)
-  expect_equal(out$n_administrations[3], 1)
-})
-
-test_that("per-admin: start_day + max_med_cycles limits treatment window", {
-  reg <- define_regimen(admin_days = 1L, 
-    vial_size = 100, vial_cost = 500,
-    med_cycle_length = 7, start_day = 7, max_med_cycles = 2
-  )
-  # Treatment window: day 7 to day 21
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 6, subcycle_precision = TRUE)
-  expect_equal(out$n_administrations[1], 0)  # days 0-6
-  expect_equal(out$n_administrations[2], 1)  # days 7-13
-  expect_equal(out$n_administrations[3], 1)  # days 14-20
-  expect_equal(out$n_administrations[4], 0)  # days 21-27 (past treat_end)
-})
-
-test_that("oral wastage: dispensing events shift with start_day", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "oral", dose_per_admin = 100,
-    tablet_strength = 100, unit_cost = 10,
-    med_cycle_length = 7, start_day = 14
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 6, subcycle_precision = TRUE)
-  # Dispensing at day 14 (cycle 3), day 21 (cycle 4), etc.
-  expect_equal(out$n_dispensing_events[1], 0)
-  expect_equal(out$n_dispensing_events[2], 0)
-  expect_equal(out$n_dispensing_events[3], 1)
-  expect_equal(out$n_dispensing_events[4], 1)
-})
-
-test_that("oral wastage analytic: start_day shifts dispensing counts", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "oral", dose_per_admin = 100,
-    tablet_strength = 100, unit_cost = 10,
-    med_cycle_length = 7, start_day = 14
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 6, subcycle_precision = FALSE)
-  expect_equal(out$n_dispensing_events[1], 0)
-  expect_equal(out$n_dispensing_events[2], 0)
-  expect_equal(out$n_dispensing_events[3], 1)
-})
-
-test_that("daily detail per-admin: med_cycle is NA and costs are 0 before start_day", {
-  reg <- define_regimen(admin_days = 1L, 
-    vial_size = 100, vial_cost = 500,
-    med_cycle_length = 7, start_day = 7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 3, daily_detail = TRUE)
-  before <- out[out$day < 7, ]
-  expect_true(all(is.na(before$med_cycle)))
-  expect_true(all(before$drug_cost == 0))
-  expect_true(all(before$total_cost == 0))
-})
-
-test_that("daily detail oral wastage: no dispensing before start_day", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "oral", dose_per_admin = 100,
-    tablet_strength = 100, unit_cost = 10,
-    med_cycle_length = 7, start_day = 7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 3, daily_detail = TRUE)
-  before <- out[out$day < 7, ]
-  expect_true(all(before$doses_dispensed == 0))
-  expect_true(all(is.na(before$med_cycle)))
-  expect_true(all(before$drug_cost == 0))
-})
-
-test_that("simple daily cost: start_day zeroes out early cycles", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "iv", cost_per_day = 100,
-    start_day = 14
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 4, simple_daily_cost = TRUE)
-  # Cycles 1-2 (days 0-13) entirely before start_day
-  expect_equal(out$drug_cost[1], 0)
-  expect_equal(out$drug_cost[2], 0)
-  # Cycles 3-4 should have costs
-  expect_equal(out$drug_cost[3], 700)
-  expect_equal(out$drug_cost[4], 700)
-})
-
-
-# ===========================================================================
-# SC / IM routes
-# ===========================================================================
-
-test_that("SC per-admin path produces correct admin counts", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "sc",
-    dose_per_admin = 100,
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 3, subcycle_precision = TRUE)
-  expect_equal(out$n_administrations, c(1, 1, 1))
-})
-
-test_that("SC total_cost = drug_cost + admin_cost", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "sc",
-    dose_per_admin = 100,
-    vial_size = 100,
-    vial_cost = 500,
-    admin_cost = 50,
-    med_cycle_length = 7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7, n_cycles = 3)
-  expect_equal(out$total_cost, out$drug_cost + out$admin_cost)
-})
-
-test_that("SC daily detail has vial columns", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "sc",
-    dose_per_admin = 100,
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7
-  )
-  out <- calculate_med_costs(reg, model_cycle_length = 7,
-    n_cycles = 2, daily_detail = TRUE)
-  expect_true("vials_used" %in% names(out))
-  expect_true("mg_wasted" %in% names(out))
-  expect_true("mg_from_vials" %in% names(out))
-})
-
-test_that("IM drug_cost matches equivalent IV setup", {
-  reg_im <- define_regimen(admin_days = 1L, 
-    route = "im",
-    dose_per_admin = 100,
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7
-  )
-  reg_iv <- define_regimen(admin_days = 1L, 
-    route = "iv",
-    dose_per_admin = 100,
-    vial_size = 100,
-    vial_cost = 500,
-    med_cycle_length = 7
-  )
-  out_im <- calculate_med_costs(reg_im, model_cycle_length = 7, n_cycles = 3)
-  out_iv <- calculate_med_costs(reg_iv, model_cycle_length = 7, n_cycles = 3)
-  expect_equal(out_im$drug_cost, out_iv$drug_cost)
-})
-
 
 # ===========================================================================
 # Multiple regimens
 # ===========================================================================
 
-test_that("multi-regimen: errors on non-regimen in ...", {
-  reg <- define_regimen(admin_days = 1L, vial_size = 100, vial_cost = 500)
-  expect_error(
-    calculate_med_costs(reg, "not_a_regimen", n_cycles = 3),
-    "med_regimen"
-  )
+test_that("multi-regimen: wide column naming and class", {
+  res <- calculate_med_costs(reg_iv(name = "Drug A"), reg_oral(name = "Drug B"),
+                             model_cycle_length = 7, n_cycles = 6)
+  expect_s3_class(res, "combo_regimen_costs")
+  for (p in c("Drug_A", "Drug_B")) {
+    for (s in c("drug_cost", "admin_cost", "dispensing_cost", "total_cost")) {
+      expect_true(paste0(p, "_", s) %in% names(res))
+    }
+  }
+  expect_equal(attr(res, "drug_names"), c("Drug A", "Drug B"))
 })
 
-test_that("multi-regimen: wide-format column naming", {
-  reg_a <- define_regimen(admin_days = 1L, 
-    name = "Drug A", vial_size = 100, vial_cost = 500
-  )
-  reg_b <- define_regimen(admin_days = 1L, 
-    name = "Drug B", vial_size = 50, vial_cost = 200
-  )
-  out <- calculate_med_costs(reg_a, reg_b, n_cycles = 3)
-  expect_true("Drug_A_drug_cost" %in% names(out))
-  expect_true("Drug_A_admin_cost" %in% names(out))
-  expect_true("Drug_A_total_cost" %in% names(out))
-  expect_true("Drug_B_drug_cost" %in% names(out))
-  expect_true("Drug_B_admin_cost" %in% names(out))
-  expect_true("Drug_B_total_cost" %in% names(out))
-  expect_true("total_cost" %in% names(out))
+test_that("multi-regimen: total = sum of per-drug totals", {
+  res <- calculate_med_costs(reg_iv(name = "A", admin_cost = 50),
+                             reg_oral(name = "B", dispensing_cost = 45),
+                             reg_oral(name = "C", charge_timing = "per_admin", admin_cost = 2),
+                             model_cycle_length = 7, n_cycles = 9)
+  expect_equal(res$total_cost, res$A_total_cost + res$B_total_cost +
+                 res$C_total_cost)
 })
 
-test_that("multi-regimen: total_cost = sum of per-drug total_cost columns", {
-  reg_a <- define_regimen(admin_days = 1L, 
-    name = "Drug A", vial_size = 100, vial_cost = 500
-  )
-  reg_b <- define_regimen(admin_days = 1L, 
-    name = "Drug B", vial_size = 50, vial_cost = 200
-  )
-  out <- calculate_med_costs(reg_a, reg_b, n_cycles = 5)
-  expect_equal(
-    out$total_cost,
-    out$Drug_A_total_cost + out$Drug_B_total_cost
-  )
+test_that("multi-regimen: per-drug costs match single-regimen calls", {
+  a <- reg_iv(name = "A", admin_cost = 50)
+  b <- reg_oral(name = "B", dispensing_cost = 45)
+  s <- reg_oral(name = "C", charge_timing = "per_admin", admin_cost = 2)
+  res <- calculate_med_costs(a, b, s, model_cycle_length = 10, n_cycles = 8)
+  for (pair in list(list(a, "A"), list(b, "B"), list(s, "C"))) {
+    one <- calculate_med_costs(pair[[1]], model_cycle_length = 10, n_cycles = 8)
+    for (col in c("drug_cost", "admin_cost", "dispensing_cost", "total_cost")) {
+      expect_equal(res[[paste0(pair[[2]], "_", col)]], one[[col]])
+    }
+  }
 })
 
-test_that("multi-regimen: per-drug costs match individual single-regimen calls", {
-  reg_a <- define_regimen(admin_days = 1L, 
-    name = "Drug A", vial_size = 100, vial_cost = 500, admin_cost = 150
-  )
-  reg_b <- define_regimen(admin_days = 1L, 
-    name = "Drug B", route = "oral", dose_per_admin = 200,
-    tablet_strength = 100, unit_cost = 20
-  )
-  combo <- calculate_med_costs(
-    reg_a, reg_b, model_cycle_length = 7, n_cycles = 4
-  )
-  indiv_a <- calculate_med_costs(reg_a, model_cycle_length = 7, n_cycles = 4)
-  indiv_b <- calculate_med_costs(reg_b, model_cycle_length = 7, n_cycles = 4)
-  expect_equal(combo$Drug_A_total_cost, indiv_a$total_cost)
-  expect_equal(combo$Drug_B_total_cost, indiv_b$total_cost)
+test_that("multi-regimen: names must be distinct", {
+  expect_error(calculate_med_costs(reg_iv(), reg_iv()), "distinct names")
 })
 
-test_that("multi-regimen: daily_detail returns wide-format data.frame", {
-  reg_a <- define_regimen(admin_days = 1L, 
-    name = "Drug A", vial_size = 100, vial_cost = 500,
-    med_cycle_length = 7
-  )
-  reg_b <- define_regimen(admin_days = 1L, 
-    name = "Drug B", route = "oral", dose_per_admin = 100,
-    tablet_strength = 100, unit_cost = 10, med_cycle_length = 7
-  )
-  out <- calculate_med_costs(
-    reg_a, reg_b, model_cycle_length = 7, n_cycles = 2,
-    daily_detail = TRUE
-  )
-  expect_s3_class(out, "combo_regimen_daily_detail")
-  expect_true(is.data.frame(out))
-  expect_true("day" %in% names(out))
-  expect_true("model_cycle" %in% names(out))
-  expect_true("total_cost" %in% names(out))
-  expect_true(any(grepl("^Drug_A_", names(out))))
-  expect_true(any(grepl("^Drug_B_", names(out))))
-  expect_equal(attr(out, "drug_names"), c("Drug A", "Drug B"))
-  expect_true(is.list(attr(out, "drug_columns")))
+test_that("multi-regimen: drug names are sanitized", {
+  res <- calculate_med_costs(reg_iv(name = "5-FU (bolus)"), reg_oral(),
+                             n_cycles = 3)
+  expect_true("5_FU__bolus__drug_cost" %in% names(res))
 })
 
-test_that("multi-regimen: three drugs aggregate correctly", {
-  reg_a <- define_regimen(admin_days = 1L, name = "A", vial_size = 100, vial_cost = 500)
-  reg_b <- define_regimen(admin_days = 1L, name = "B", vial_size = 50, vial_cost = 200)
-  reg_c <- define_regimen(admin_days = 1L, name = "C", vial_size = 25, vial_cost = 100)
-  out <- calculate_med_costs(reg_a, reg_b, reg_c, n_cycles = 3)
-  expect_equal(
-    out$total_cost,
-    out$A_total_cost + out$B_total_cost + out$C_total_cost
-  )
+test_that("multi-regimen: daily detail is wide", {
+  res <- calculate_med_costs(reg_iv(name = "A"), reg_oral(name = "B"),
+                             model_cycle_length = 7, n_cycles = 3,
+                             daily_detail = TRUE)
+  expect_s3_class(res, "combo_regimen_daily_detail")
+  expect_equal(nrow(res), 21)
+  expect_true(all(c("A_drug_cost", "B_mg_taken", "total_cost") %in% names(res)))
+  expect_equal(res$total_cost, res$A_total_cost + res$B_total_cost)
 })
-
-test_that("multi-regimen: drug name sanitization", {
-  reg <- define_regimen(admin_days = 1L, 
-    name = "Drug-A (combo)", vial_size = 100, vial_cost = 500
-  )
-  reg2 <- define_regimen(admin_days = 1L, 
-    name = "Drug B", vial_size = 50, vial_cost = 200
-  )
-  out <- calculate_med_costs(reg, reg2, n_cycles = 3)
-  sanitized <- gsub("[^a-zA-Z0-9]", "_", "Drug-A (combo)")
-  expect_true(paste0(sanitized, "_total_cost") %in% names(out))
-})
-
 
 # ===========================================================================
-# Shared administration costs
+# Shared fees
 # ===========================================================================
 
-test_that("shared_admin: validation errors on unknown drug name", {
-  reg_a <- define_regimen(admin_days = 1L, name = "Drug A", vial_size = 100, vial_cost = 500,
-    admin_cost = 100)
-  reg_b <- define_regimen(admin_days = 1L, name = "Drug B", vial_size = 50, vial_cost = 200,
-    admin_cost = 50)
-  expect_error(
-    calculate_med_costs(reg_a, reg_b, n_cycles = 3,
-      shared_admin = list(c("Drug A", "Drug X"))),
-    "Unknown drug name"
-  )
-})
-
-test_that("shared_admin: validation errors on drug in multiple groups", {
-  reg_a <- define_regimen(admin_days = 1L, name = "Drug A", vial_size = 100, vial_cost = 500,
-    admin_cost = 100)
-  reg_b <- define_regimen(admin_days = 1L, name = "Drug B", vial_size = 50, vial_cost = 200,
-    admin_cost = 50)
-  reg_c <- define_regimen(admin_days = 1L, name = "Drug C", vial_size = 25, vial_cost = 100,
-    admin_cost = 75)
-  expect_error(
-    calculate_med_costs(reg_a, reg_b, reg_c, n_cycles = 3,
-      shared_admin = list(c("Drug A", "Drug B"), c("Drug A", "Drug C"))),
-    "multiple shared_admin groups"
-  )
-})
-
-test_that("shared_admin: validation errors on group with < 2 drugs", {
-  reg_a <- define_regimen(admin_days = 1L, name = "Drug A", vial_size = 100, vial_cost = 500,
-    admin_cost = 100)
-  reg_b <- define_regimen(admin_days = 1L, name = "Drug B", vial_size = 50, vial_cost = 200,
-    admin_cost = 50)
-  expect_error(
-    calculate_med_costs(reg_a, reg_b, n_cycles = 3,
-      shared_admin = list(c("Drug A"))),
-    "at least 2 drugs"
-  )
+test_that("shared_admin: validation", {
+  a <- reg_iv(name = "A"); b <- reg_iv(name = "B"); c <- reg_iv(name = "C")
+  expect_error(calculate_med_costs(a, b, shared_admin = list(c("A", "Z"))),
+               "Unknown drug")
+  expect_error(calculate_med_costs(a, b, c,
+                                   shared_admin = list(c("A", "B"), c("B", "C"))),
+               "multiple")
+  expect_error(calculate_med_costs(a, b, shared_admin = list("A")),
+               "at least 2")
+  expect_error(calculate_med_costs(a, b, shared_admin = "A"), "must be NULL")
 })
 
 test_that("shared_admin: single regimen warns and ignores", {
-  reg <- define_regimen(admin_days = 1L, vial_size = 100, vial_cost = 500, admin_cost = 100)
-  expect_warning(
-    calculate_med_costs(reg, n_cycles = 3, shared_admin = TRUE),
-    "ignored for single-regimen"
-  )
+  expect_warning(calculate_med_costs(reg_iv(), shared_admin = TRUE), "ignored")
 })
 
-test_that("shared_admin = TRUE: same-day drugs share, highest wins", {
-  # Both drugs admin on day 1 of 21-day cycle, same schedule
-  reg_a <- define_regimen( 
-    name = "Drug A", vial_size = 100, vial_cost = 500,
-    admin_cost = 100, med_cycle_length = 21, admin_days = 1
-  )
-  reg_b <- define_regimen( 
-    name = "Drug B", vial_size = 50, vial_cost = 200,
-    admin_cost = 50, med_cycle_length = 21, admin_days = 1
-  )
-
-  out_shared <- calculate_med_costs(
-    reg_a, reg_b, model_cycle_length = 21, n_cycles = 3,
-    shared_admin = TRUE
-  )
-  out_no_share <- calculate_med_costs(
-    reg_a, reg_b, model_cycle_length = 21, n_cycles = 3
-  )
-
-  # With sharing, only the higher admin cost ($100) should be charged
-  # Without sharing: $100 + $50 = $150 per cycle
-  # With sharing: $100 per cycle (Drug A wins)
-  expect_equal(out_shared$Drug_A_admin_cost, rep(100, 3))
-  expect_equal(out_shared$Drug_B_admin_cost, rep(0, 3))
-
-  # Total cost should be less with sharing
-  expect_true(all(out_shared$total_cost < out_no_share$total_cost))
-
-  # Savings should equal Drug B's admin cost each cycle
-  savings <- out_no_share$total_cost - out_shared$total_cost
-  expect_equal(savings, rep(50, 3))
+test_that("shared_admin: same-day admin fees share, highest wins", {
+  a <- reg_iv(name = "A", admin_cost = 100)
+  b <- reg_iv(name = "B", admin_cost = 60)
+  res <- calculate_med_costs(a, b, model_cycle_length = 21, n_cycles = 2,
+                             shared_admin = TRUE)
+  expect_equal(res$A_admin_cost, c(100, 100))
+  expect_equal(res$B_admin_cost, c(0, 0))
+  expect_equal(res$B_pre_sharing_admin_cost, c(60, 60))
 })
 
-test_that("shared_admin = TRUE: pre_sharing columns present at cycle level", {
-  reg_a <- define_regimen( 
-    name = "Drug A", vial_size = 100, vial_cost = 500,
-    admin_cost = 100, med_cycle_length = 21, admin_days = 1
-  )
-  reg_b <- define_regimen( 
-    name = "Drug B", vial_size = 50, vial_cost = 200,
-    admin_cost = 50, med_cycle_length = 21, admin_days = 1
-  )
-  out <- calculate_med_costs(
-    reg_a, reg_b, model_cycle_length = 21, n_cycles = 3,
-    shared_admin = TRUE
-  )
-  expect_true("Drug_A_pre_sharing_admin_cost" %in% names(out))
-  expect_true("Drug_B_pre_sharing_admin_cost" %in% names(out))
-  expect_equal(out$Drug_A_pre_sharing_admin_cost, rep(100, 3))
-  expect_equal(out$Drug_B_pre_sharing_admin_cost, rep(50, 3))
+test_that("shared_admin: dispensing fees share separately from admin fees", {
+  a <- reg_iv(name = "A", admin_cost = 100, dispensing_cost = 10)
+  b <- reg_oral(name = "B", dispensing_cost = 45)
+  res <- calculate_med_costs(a, b, model_cycle_length = 21, n_cycles = 2,
+                             shared_admin = TRUE)
+  expect_equal(res$A_admin_cost, c(100, 100))
+  expect_equal(res$A_dispensing_cost, c(0, 0))
+  expect_equal(res$B_dispensing_cost, c(45, 45))
+  expect_equal(res$A_pre_sharing_dispensing_cost, c(10, 10))
+  expect_equal(res$total_cost, res$A_total_cost + res$B_total_cost)
 })
 
-test_that("shared_admin: daily detail shows per-day sharing with diagnostic columns", {
-  reg_a <- define_regimen( 
-    name = "Drug A", vial_size = 100, vial_cost = 500,
-    admin_cost = 100, med_cycle_length = 21, admin_days = 1
-  )
-  reg_b <- define_regimen( 
-    name = "Drug B", vial_size = 50, vial_cost = 200,
-    admin_cost = 50, med_cycle_length = 21, admin_days = 1
-  )
-  out <- calculate_med_costs(
-    reg_a, reg_b, model_cycle_length = 21, n_cycles = 2,
-    daily_detail = TRUE, shared_admin = TRUE
-  )
-
-  expect_s3_class(out, "combo_regimen_daily_detail")
-  expect_true("Drug_A_pre_sharing_admin_cost" %in% names(out))
-  expect_true("Drug_B_pre_sharing_admin_cost" %in% names(out))
-
-  # On admin day (day 0): Drug A pre-sharing = 100, Drug B pre-sharing = 50
-  day0 <- out[out$day == 0, ]
-  expect_equal(day0$Drug_A_pre_sharing_admin_cost, 100)
-  expect_equal(day0$Drug_B_pre_sharing_admin_cost, 50)
-  # After sharing: Drug A keeps 100, Drug B zeroed
-  expect_equal(day0$Drug_A_admin_cost, 100)
-  expect_equal(day0$Drug_B_admin_cost, 0)
-
-  # drug_columns attribute includes pre_sharing columns
-  dcols <- attr(out, "drug_columns")
-  expect_true("Drug_A_pre_sharing_admin_cost" %in% dcols[["Drug A"]])
-  expect_true("Drug_B_pre_sharing_admin_cost" %in% dcols[["Drug B"]])
+test_that("shared_admin: ties go to the first drug", {
+  a <- reg_iv(name = "A", admin_cost = 50)
+  b <- reg_iv(name = "B", admin_cost = 50)
+  res <- calculate_med_costs(a, b, model_cycle_length = 21, n_cycles = 1,
+                             shared_admin = TRUE)
+  expect_equal(c(res$A_admin_cost, res$B_admin_cost), c(50, 0))
 })
 
-test_that("shared_admin: no overlap means sharing has no effect", {
-  # Drug A on day 1, Drug B on day 8 — never overlap
-  reg_a <- define_regimen( 
-    name = "Drug A", vial_size = 100, vial_cost = 500,
-    admin_cost = 100, med_cycle_length = 21, admin_days = 1
-  )
-  reg_b <- define_regimen( 
-    name = "Drug B", vial_size = 50, vial_cost = 200,
-    admin_cost = 50, med_cycle_length = 21, admin_days = 8
-  )
-  out_shared <- calculate_med_costs(
-    reg_a, reg_b, model_cycle_length = 21, n_cycles = 3,
-    shared_admin = TRUE
-  )
-  out_no_share <- calculate_med_costs(
-    reg_a, reg_b, model_cycle_length = 21, n_cycles = 3
-  )
-  # Total costs should be equal since drugs never overlap
-  expect_equal(out_shared$total_cost, out_no_share$total_cost)
+test_that("shared_admin: no same-day overlap means no effect", {
+  a <- reg_iv(name = "A", admin_cost = 100)
+  b <- reg_iv(name = "B", admin_cost = 60, admin_days = 8L)
+  res <- calculate_med_costs(a, b, model_cycle_length = 21, n_cycles = 2,
+                             shared_admin = TRUE)
+  expect_equal(res$B_admin_cost, c(60, 60))
 })
 
-test_that("shared_admin: partial groups — 3 drugs, only 2 sharing", {
-  reg_a <- define_regimen( 
-    name = "Drug A", vial_size = 100, vial_cost = 500,
-    admin_cost = 100, med_cycle_length = 21, admin_days = 1
-  )
-  reg_b <- define_regimen( 
-    name = "Drug B", vial_size = 50, vial_cost = 200,
-    admin_cost = 50, med_cycle_length = 21, admin_days = 1
-  )
-  reg_c <- define_regimen( 
-    name = "Drug C", vial_size = 25, vial_cost = 100,
-    admin_cost = 75, med_cycle_length = 21, admin_days = 1
-  )
-  out <- calculate_med_costs(
-    reg_a, reg_b, reg_c, model_cycle_length = 21, n_cycles = 3,
-    shared_admin = list(c("Drug A", "Drug B"))
-  )
-
-  # Drug A & B share: A wins ($100 vs $50), B zeroed
-  expect_equal(out$Drug_A_admin_cost, rep(100, 3))
-  expect_equal(out$Drug_B_admin_cost, rep(0, 3))
-
-  # Drug C is independent, keeps its admin cost
-  expect_equal(out$Drug_C_admin_cost, rep(75, 3))
-
-  # Pre-sharing columns only for grouped drugs (A and B), not C
-  expect_true("Drug_A_pre_sharing_admin_cost" %in% names(out))
-  expect_true("Drug_B_pre_sharing_admin_cost" %in% names(out))
-  expect_false("Drug_C_pre_sharing_admin_cost" %in% names(out))
+test_that("shared_admin: partial groups leave other drugs alone", {
+  a <- reg_iv(name = "A", admin_cost = 100)
+  b <- reg_iv(name = "B", admin_cost = 60)
+  c <- reg_iv(name = "C", admin_cost = 40)
+  res <- calculate_med_costs(a, b, c, model_cycle_length = 21, n_cycles = 1,
+                             shared_admin = list(c("A", "B")))
+  expect_equal(c(res$A_admin_cost, res$B_admin_cost, res$C_admin_cost),
+               c(100, 0, 40))
+  expect_false("C_pre_sharing_admin_cost" %in% names(res))
 })
 
-test_that("shared_admin = NULL: backward compatible, no pre_sharing columns", {
-  reg_a <- define_regimen(admin_days = 1L, 
-    name = "Drug A", vial_size = 100, vial_cost = 500,
-    admin_cost = 100, med_cycle_length = 21
-  )
-  reg_b <- define_regimen(admin_days = 1L, 
-    name = "Drug B", vial_size = 50, vial_cost = 200,
-    admin_cost = 50, med_cycle_length = 21
-  )
-  out <- calculate_med_costs(reg_a, reg_b, model_cycle_length = 21, n_cycles = 3)
-  expect_false(any(grepl("pre_sharing", names(out))))
+test_that("shared_admin = NULL: no pre-sharing columns", {
+  res <- calculate_med_costs(reg_iv(name = "A"), reg_iv(name = "B"),
+                             n_cycles = 2)
+  expect_false(any(grepl("pre_sharing", names(res))))
+  expect_null(attr(res, "shared_admin"))
 })
 
-test_that("shared_admin: class and attributes set correctly", {
-  reg_a <- define_regimen( 
-    name = "Drug A", vial_size = 100, vial_cost = 500,
-    admin_cost = 100, med_cycle_length = 21, admin_days = 1
-  )
-  reg_b <- define_regimen( 
-    name = "Drug B", vial_size = 50, vial_cost = 200,
-    admin_cost = 50, med_cycle_length = 21, admin_days = 1
-  )
-
-  # Cycle-level
-  out_cycle <- calculate_med_costs(
-    reg_a, reg_b, model_cycle_length = 21, n_cycles = 3,
-    shared_admin = TRUE
-  )
-  expect_s3_class(out_cycle, "combo_regimen_costs")
-  expect_equal(attr(out_cycle, "drug_names"), c("Drug A", "Drug B"))
-  expect_true(!is.null(attr(out_cycle, "shared_admin")))
-
-  # Daily
-  out_daily <- calculate_med_costs(
-    reg_a, reg_b, model_cycle_length = 21, n_cycles = 2,
-    daily_detail = TRUE, shared_admin = TRUE
-  )
-  expect_s3_class(out_daily, "combo_regimen_daily_detail")
-  expect_equal(attr(out_daily, "drug_names"), c("Drug A", "Drug B"))
-  expect_true(!is.null(attr(out_daily, "shared_admin")))
-})
-
-test_that("shared_admin: tied admin costs resolved by input order (first wins)", {
-  reg_a <- define_regimen( 
-    name = "Drug A", vial_size = 100, vial_cost = 500,
-    admin_cost = 100, med_cycle_length = 21, admin_days = 1
-  )
-  reg_b <- define_regimen( 
-    name = "Drug B", vial_size = 50, vial_cost = 200,
-    admin_cost = 100, med_cycle_length = 21, admin_days = 1
-  )
-  out <- calculate_med_costs(
-    reg_a, reg_b, model_cycle_length = 21, n_cycles = 3,
-    daily_detail = TRUE, shared_admin = TRUE
-  )
-  day0 <- out[out$day == 0, ]
-  # Both have $100 admin — first (Drug A) should win
-  expect_equal(day0$Drug_A_admin_cost, 100)
-  expect_equal(day0$Drug_B_admin_cost, 0)
-})
-
-
-# ===========================================================================
-# Non-uniform cycle_times
-# ===========================================================================
-
-test_that("non-uniform cycle_times: correct cycle_end_day values", {
-  reg <- define_regimen(admin_days = 1L, 
-    vial_size = 100, vial_cost = 500,
-    med_cycle_length = 7
-  )
-  out <- calculate_med_costs(
-    reg, cycle_times = c(0, 7, 14, 28),
-    subcycle_precision = TRUE
-  )
-  expect_equal(out$cycle_end_day, c(7, 14, 28, 42))
-})
-
-test_that("non-uniform cycle_times: correct admin counts for longer cycle", {
-  # 7-day med cycle, admin on day 1 only
-  # cycle_times = c(0, 7, 14, 28): cycle 3 spans days 14-28 (14 days)
-  # => 2 med cycles fit in that model cycle => 2 admins
-  reg <- define_regimen( 
-    vial_size = 100, vial_cost = 500,
-    med_cycle_length = 7, admin_days = 1
-  )
-  out <- calculate_med_costs(
-    reg, cycle_times = c(0, 7, 14, 28),
-    subcycle_precision = TRUE
-  )
-  expect_equal(out$n_administrations[3], 2)
-})
-
-test_that("non-uniform cycle_times: simple daily cost uses per-cycle lengths", {
-  reg <- define_regimen(admin_days = 1L, 
-    route = "iv",
-    cost_per_day = 10
-  )
-  out <- calculate_med_costs(
-    reg, cycle_times = c(0, 7, 14, 28),
-    simple_daily_cost = TRUE
-  )
-  expect_equal(out$drug_cost, c(70, 70, 140, 140))
+test_that("shared_admin: daily detail shows sharing per day", {
+  a <- reg_iv(name = "A", admin_cost = 100)
+  b <- reg_iv(name = "B", admin_cost = 60)
+  d <- calculate_med_costs(a, b, model_cycle_length = 21, n_cycles = 1,
+                           daily_detail = TRUE, shared_admin = TRUE)
+  expect_equal(d$B_pre_sharing_admin_cost[1], 60)
+  expect_equal(d$B_admin_cost[1], 0)
+  expect_equal(attr(d, "shared_admin"), list(c("A", "B")))
 })

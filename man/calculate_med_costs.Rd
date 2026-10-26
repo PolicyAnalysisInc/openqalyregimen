@@ -9,9 +9,7 @@ calculate_med_costs(
   model_cycle_length = 7,
   n_cycles = 52,
   cycle_times = NULL,
-  subcycle_precision = FALSE,
   daily_detail = FALSE,
-  simple_daily_cost = FALSE,
   shared_admin = NULL
 )
 }
@@ -28,47 +26,40 @@ calculate_med_costs(
 \code{n_cycles} and \code{model_cycle_length} are
 inferred.}
 
-\item{subcycle_precision}{Logical. If TRUE, builds a daily-level vector of
-events and aggregates to model cycles. Provides exact
-counts when med cycles and model cycles are
-misaligned. For oral with wastage, sub-cycle
-precision tracks dispensing events at med cycle
-starts.}
+\item{daily_detail}{Logical. If TRUE, returns one row per day showing
+administrations, dispensings and costs.}
 
-\item{daily_detail}{Logical. If TRUE (requires subcycle_precision = TRUE),
-returns a daily-resolution data frame with one row
-per day showing dispensing events, administration
-events, and costs on each day. The daily frame
-includes a \code{model_cycle} column so you can
-aggregate yourself or inspect the raw schedule.}
-
-\item{simple_daily_cost}{Logical. If TRUE (and regimen has cost_per_day),
-simply returns cost_per_day x days per model cycle.}
-
-\item{shared_admin}{Controls whether drugs in a combination share
-administration costs on overlapping days. When multiple drugs are
-administered on the same day, only the highest administration cost in
-a sharing group is charged; the others are zeroed out.
+\item{shared_admin}{Controls whether drugs in a combination share fees on
+the same day. When several drugs in a sharing group have a fee on the
+same day, only the highest is charged; this applies separately to
+\code{admin_cost} and \code{dispensing_cost}.
 \itemize{
-\item \code{NULL} (default): no sharing, backward compatible.
+\item \code{NULL} (default): no sharing.
 \item \code{TRUE}: all drugs in one sharing group.
 \item A list of character vectors: explicit groups, e.g.
 \code{list(c("Drug A", "Drug B"))}. Drug names must match the
 \code{name} parameter from \code{define_regimen()}.
 }
-When active, adds \code{{Drug}_pre_sharing_admin_cost} diagnostic columns
-showing original admin costs before sharing adjustment.}
+When active, adds \code{{Drug}_pre_sharing_admin_cost} and
+\code{{Drug}_pre_sharing_dispensing_cost} diagnostic columns.}
 }
 \value{
 See description.
 }
 \description{
-Accepts one or more \code{med_regimen} objects. When a single regimen is
-supplied the return value is identical to the previous API (a data.frame).
-When multiple regimens are supplied and \code{daily_detail = FALSE}, the
-result is a wide-format data.frame with per-drug columns
+Accepts one or more \code{med_regimen} objects. With a single regimen the
+result is a data.frame with one row per model cycle and columns
+\code{cycle}, \code{cycle_start_day}, \code{cycle_end_day},
+\code{n_administrations}, \code{n_dispensings}, \code{drug_cost},
+\code{admin_cost}, \code{dispensing_cost} and \code{total_cost}. With
+several regimens the result is wide, with per-drug columns
 (\code{{Name}_drug_cost}, \code{{Name}_admin_cost},
-\code{{Name}_total_cost}) plus a combined \code{total_cost}. When multiple
-regimens are supplied with \code{daily_detail = TRUE}, the result is a
-named list of per-drug daily data.frames.
+\code{{Name}_dispensing_cost}, \code{{Name}_total_cost}) and a combined
+\code{total_cost}.
+}
+\details{
+Drug cost is recorded per administration (\code{charge_timing =
+"per_admin"}) or as a whole medication cycle's doses on day 1 of that cycle
+(\code{"per_dispensing"}). \code{admin_cost} is charged on every
+administration and \code{dispensing_cost} once per medication cycle.
 }

@@ -25,7 +25,7 @@ library(tibble)
 This vignette shows how to use `openqalyregimen` inside a working
 `openqaly` model. Medication and administration costing can become complicated
 when treatment regimens include loading doses, maintenance dosing, different
-routes of administration, and route-specific costing rules.
+routes of administration, and different fees.
 
 `openqalyregimen` provides a declarative way to define those regimens and turn
 them into cost vectors. `openqaly` can then use those vectors as ordinary model
@@ -43,7 +43,8 @@ Both approaches compare:
 
 The trastuzumab strategy includes a loading dose followed by maintenance
 dosing. The model keeps those phases together as one medication-level cost
-stream while still separating medication and administration line items.
+stream while still separating medication, administration and dispensing line
+items.
 
 The model uses the standard `openqaly` pattern. Values represent line items.
 Summaries aggregate those values into outputs such as total cost, total QALYs,
@@ -61,6 +62,13 @@ Patient-level dosing inputs stay outside the regimen tables:
 
 - `patient_bsa`
 - `patient_weight`
+
+Every regimen accepts these values and uses the one its `dose_basis` needs.
+Because they are model variables, they can change in sensitivity analyses and
+PSA. Capecitabine is costed as whole tablets (`exact = TRUE`): at the base-case
+BSA of 1.8 m² the 3,600 mg dose is 6 x 500 mg + 4 x 150 mg. If a run uses a BSA
+whose dose the tablets can't make up exactly, costing that run stops with an
+error naming the nearest amounts the tablets can make up.
 
 `openqalyregimen` functions are not visible inside `openqaly` model formulas
 unless the model loads the package. The shared model therefore includes a
@@ -111,9 +119,11 @@ model_direct <- base_model |>
       med_cycle_length = cycle_length_days,
       admin_days = 1:14,
       max_med_cycles = max(cycle),
-      available_strengths = c(150, 500),
+      unit_size = c(150, 500),
       unit_cost = 2.21,
-      admin_cost = 45
+      exact = TRUE,
+      charge_timing = "per_dispensing",
+      dispensing_cost = 45
     ),
     strategy = "oral_mono"
   ) |>
@@ -129,9 +139,11 @@ model_direct <- base_model |>
       admin_days = 1,
       max_med_cycles = 1,
       start_day = 0,
-      vial_sizes = c(150, 420),
-      vial_cost = c(407.40, 1184),
-      wastage_threshold = 0.1,
+      unit_size = c(150, 420),
+      unit_cost = c(407.40, 1184),
+      exact = FALSE,
+      max_dose_rounding = 0.1,
+      charge_timing = "per_admin",
       admin_cost = 241
     ),
     strategy = "iv_combo"
@@ -148,9 +160,11 @@ model_direct <- base_model |>
       admin_days = 1,
       max_med_cycles = max(cycle) - 1,
       start_day = cycle_length_days,
-      vial_sizes = c(150, 420),
-      vial_cost = c(407.40, 1184),
-      wastage_threshold = 0.1,
+      unit_size = c(150, 420),
+      unit_cost = c(407.40, 1184),
+      exact = FALSE,
+      max_dose_rounding = 0.1,
+      charge_timing = "per_admin",
       admin_cost = 241
     ),
     strategy = "iv_combo"
@@ -165,8 +179,10 @@ model_direct <- base_model |>
       med_cycle_length = cycle_length_days,
       admin_days = 1,
       max_med_cycles = max(cycle),
-      vial_sizes = 420,
-      vial_cost = 2750,
+      unit_size = 420,
+      unit_cost = 2750,
+      exact = FALSE,
+      charge_timing = "per_admin",
       admin_cost = 241
     ),
     strategy = "iv_combo"
@@ -182,10 +198,10 @@ model_direct <- base_model |>
     strategy = "oral_mono"
   ) |>
   add_variable(
-    "c_capecitabine_admin",
+    "c_capecitabine_disp",
     calculate_regimen_cost(
       capecitabine_regimen,
-      type = "administration",
+      type = "dispensing",
       model_cycle_length = cycle_length_days,
       n_cycles = max(cycle)
     ),
@@ -196,7 +212,7 @@ model_direct <- base_model |>
   add_variable("c_pertuzumab_med", 0, strategy = "oral_mono") |>
   add_variable("c_pertuzumab_admin", 0, strategy = "oral_mono") |>
   add_variable("c_capecitabine_med", 0, strategy = "iv_combo") |>
-  add_variable("c_capecitabine_admin", 0, strategy = "iv_combo") |>
+  add_variable("c_capecitabine_disp", 0, strategy = "iv_combo") |>
   add_variable(
     "c_trastuzumab_med",
     calculate_regimen_cost(
@@ -250,7 +266,7 @@ model_direct <- base_model |>
     strategy = "iv_combo"
   ) |>
   add_value("capecitabine_med_cost", c_capecitabine_med, state = "alive", type = "cost") |>
-  add_value("capecitabine_admin_cost", c_capecitabine_admin, state = "alive", type = "cost") |>
+  add_value("capecitabine_dispensing_cost", c_capecitabine_disp, state = "alive", type = "cost") |>
   add_value("trastuzumab_med_cost", c_trastuzumab_med, state = "alive", type = "cost") |>
   add_value("trastuzumab_admin_cost", c_trastuzumab_admin, state = "alive", type = "cost") |>
   add_value("pertuzumab_med_cost", c_pertuzumab_med, state = "alive", type = "cost") |>
@@ -259,7 +275,7 @@ model_direct <- base_model |>
   add_value("ly", cycle_length_years, state = "alive", type = "outcome") |>
   add_summary(
     "total_cost",
-    "capecitabine_med_cost,capecitabine_admin_cost,trastuzumab_med_cost,trastuzumab_admin_cost,pertuzumab_med_cost,pertuzumab_admin_cost",
+    "capecitabine_med_cost,capecitabine_dispensing_cost,trastuzumab_med_cost,trastuzumab_admin_cost,pertuzumab_med_cost,pertuzumab_admin_cost",
     type = "cost"
   ) |>
   add_summary("total_qalys", "qaly", type = "outcome") |>
@@ -283,8 +299,11 @@ direct_cost_breakdown |>
   select(strategy, group, summary, value, amount)
 ```
 
-This is where the medication and administration line items appear. They are
-values inside the `total_cost` summary, not separate summaries.
+This is where the medication, administration and dispensing line items appear.
+They are values inside the `total_cost` summary, not separate summaries.
+Capecitabine's \$45 pharmacy fee is a dispensing cost (once per medication
+cycle), pulled with `type = "dispensing"`; the IV drugs' \$241 infusion fee is
+an administration cost (each dose), pulled with `type = "administration"`.
 
 ## 2. Table-based regimen definitions with `define_regimen_table()`
 
@@ -297,11 +316,11 @@ regimen object so they remain one medication-level stream in the model outputs.
 
 ```{r regimen-tables}
 regimen_tbl <- tribble(
-  ~component_group,          ~name,                      ~route, ~dose, ~dose_basis, ~med_cycle_length, ~admin_days, ~max_cycles, ~start_day, ~available_strengths, ~unit_cost, ~vial_sizes, ~vial_cost,      ~wastage_threshold, ~admin_cost,
-  "oral_mono",               "Capecitabine",             "oral",  2000, "bsa",                       21, "1-14",               8,         NA, "150,500",                     2.21, "",          "",                           NA,          45,
-  "iv_combo_trastuzumab",    "Trastuzumab loading",      "iv",       8, "weight",                    21, "1",                  1,          0, "",                             NA, "150,420",   "407.40,1184",                0.1,         241,
-  "iv_combo_trastuzumab",    "Trastuzumab maintenance",  "iv",       6, "weight",                    21, "1",                  7,         21, "",                             NA, "150,420",   "407.40,1184",                0.1,         241,
-  "iv_combo_pertuzumab",     "Pertuzumab",               "iv",     420, "flat",                      21, "1",                  8,         NA, "",                             NA, "420",       "2750",                       NA,         241
+  ~component_group,       ~name,                     ~route, ~dose, ~dose_basis, ~med_cycle_length, ~admin_days, ~max_cycles, ~start_day, ~unit_size, ~unit_cost,    ~exact, ~max_dose_rounding, ~charge_timing,   ~admin_cost, ~dispensing_cost,
+  "oral_mono",            "Capecitabine",            "oral",  2000, "bsa",                      21, "1-14",               8,         NA, "150,500",  "2.21",         TRUE,                 NA, "per_dispensing",          NA,               45,
+  "iv_combo_trastuzumab", "Trastuzumab loading",     "iv",       8, "weight",                   21, "1",                  1,          0, "150,420",  "407.40,1184",  FALSE,               0.1, "per_admin",              241,               NA,
+  "iv_combo_trastuzumab", "Trastuzumab maintenance", "iv",       6, "weight",                   21, "1",                  7,         21, "150,420",  "407.40,1184",  FALSE,               0.1, "per_admin",              241,               NA,
+  "iv_combo_pertuzumab",  "Pertuzumab",              "iv",     420, "flat",                     21, "1",                  8,         NA, "420",      "2750",         FALSE,                NA, "per_admin",              241,               NA
 )
 
 regimen_tbl
@@ -347,10 +366,10 @@ model_tabular <- base_model |>
     strategy = "oral_mono"
   ) |>
   add_variable(
-    "c_capecitabine_admin",
+    "c_capecitabine_disp",
     calculate_regimen_cost(
       capecitabine_regimen,
-      type = "administration",
+      type = "dispensing",
       model_cycle_length = cycle_length_days,
       n_cycles = max(cycle)
     ),
@@ -361,7 +380,7 @@ model_tabular <- base_model |>
   add_variable("c_pertuzumab_med", 0, strategy = "oral_mono") |>
   add_variable("c_pertuzumab_admin", 0, strategy = "oral_mono") |>
   add_variable("c_capecitabine_med", 0, strategy = "iv_combo") |>
-  add_variable("c_capecitabine_admin", 0, strategy = "iv_combo") |>
+  add_variable("c_capecitabine_disp", 0, strategy = "iv_combo") |>
   add_variable(
     "c_trastuzumab_med",
     calculate_regimen_cost(
@@ -403,7 +422,7 @@ model_tabular <- base_model |>
     strategy = "iv_combo"
   ) |>
   add_value("capecitabine_med_cost", c_capecitabine_med, state = "alive", type = "cost") |>
-  add_value("capecitabine_admin_cost", c_capecitabine_admin, state = "alive", type = "cost") |>
+  add_value("capecitabine_dispensing_cost", c_capecitabine_disp, state = "alive", type = "cost") |>
   add_value("trastuzumab_med_cost", c_trastuzumab_med, state = "alive", type = "cost") |>
   add_value("trastuzumab_admin_cost", c_trastuzumab_admin, state = "alive", type = "cost") |>
   add_value("pertuzumab_med_cost", c_pertuzumab_med, state = "alive", type = "cost") |>
@@ -412,7 +431,7 @@ model_tabular <- base_model |>
   add_value("ly", cycle_length_years, state = "alive", type = "outcome") |>
   add_summary(
     "total_cost",
-    "capecitabine_med_cost,capecitabine_admin_cost,trastuzumab_med_cost,trastuzumab_admin_cost,pertuzumab_med_cost,pertuzumab_admin_cost",
+    "capecitabine_med_cost,capecitabine_dispensing_cost,trastuzumab_med_cost,trastuzumab_admin_cost,pertuzumab_med_cost,pertuzumab_admin_cost",
     type = "cost"
   ) |>
   add_summary("total_qalys", "qaly", type = "outcome") |>
@@ -441,7 +460,8 @@ model values.
 This is the core integration pattern:
 
 1. define regimen objects inside ordinary `openqaly` variables
-2. calculate medication/admin cost vectors as variables
+2. calculate medication, administration and dispensing cost vectors as
+   variables
 3. add those vectors to the model as line-item values
 4. aggregate them with summaries such as `total_cost`, `total_qalys`, and
    `total_lys`

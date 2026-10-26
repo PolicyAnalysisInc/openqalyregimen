@@ -29,14 +29,20 @@ resolve_cycles <- function(n_cycles, model_cycle_length, cycle_times = NULL) {
 
 #' Calculate medication costs cycle-by-cycle for a Markov model
 #'
-#' Accepts one or more \code{med_regimen} objects. When a single regimen is
-#' supplied the return value is identical to the previous API (a data.frame).
-#' When multiple regimens are supplied and \code{daily_detail = FALSE}, the
-#' result is a wide-format data.frame with per-drug columns
+#' Accepts one or more \code{med_regimen} objects. With a single regimen the
+#' result is a data.frame with one row per model cycle and columns
+#' \code{cycle}, \code{cycle_start_day}, \code{cycle_end_day},
+#' \code{n_administrations}, \code{n_dispensings}, \code{drug_cost},
+#' \code{admin_cost}, \code{dispensing_cost} and \code{total_cost}. With
+#' several regimens the result is wide, with per-drug columns
 #' (\code{{Name}_drug_cost}, \code{{Name}_admin_cost},
-#' \code{{Name}_total_cost}) plus a combined \code{total_cost}. When multiple
-#' regimens are supplied with \code{daily_detail = TRUE}, the result is a
-#' named list of per-drug daily data.frames.
+#' \code{{Name}_dispensing_cost}, \code{{Name}_total_cost}) and a combined
+#' \code{total_cost}.
+#'
+#' Drug cost is recorded per administration (\code{charge_timing =
+#' "per_admin"}) or as a whole medication cycle's doses on day 1 of that cycle
+#' (\code{"per_dispensing"}). \code{admin_cost} is charged on every
+#' administration and \code{dispensing_cost} once per medication cycle.
 #'
 #' @param ...              One or more \code{med_regimen} objects (from
 #'                         \code{define_regimen}).
@@ -46,33 +52,21 @@ resolve_cycles <- function(n_cycles, model_cycle_length, cycle_times = NULL) {
 #'                        (in days) of each model cycle directly. If supplied,
 #'                        \code{n_cycles} and \code{model_cycle_length} are
 #'                        inferred.
-#' @param subcycle_precision Logical. If TRUE, builds a daily-level vector of
-#'                        events and aggregates to model cycles. Provides exact
-#'                        counts when med cycles and model cycles are
-#'                        misaligned. For oral with wastage, sub-cycle
-#'                        precision tracks dispensing events at med cycle
-#'                        starts.
-#' @param daily_detail    Logical. If TRUE (requires subcycle_precision = TRUE),
-#'                        returns a daily-resolution data frame with one row
-#'                        per day showing dispensing events, administration
-#'                        events, and costs on each day. The daily frame
-#'                        includes a \code{model_cycle} column so you can
-#'                        aggregate yourself or inspect the raw schedule.
-#' @param simple_daily_cost Logical. If TRUE (and regimen has cost_per_day),
-#'                          simply returns cost_per_day x days per model cycle.
-#' @param shared_admin Controls whether drugs in a combination share
-#'   administration costs on overlapping days. When multiple drugs are
-#'   administered on the same day, only the highest administration cost in
-#'   a sharing group is charged; the others are zeroed out.
+#' @param daily_detail    Logical. If TRUE, returns one row per day showing
+#'                        administrations, dispensings and costs.
+#' @param shared_admin Controls whether drugs in a combination share fees on
+#'   the same day. When several drugs in a sharing group have a fee on the
+#'   same day, only the highest is charged; this applies separately to
+#'   \code{admin_cost} and \code{dispensing_cost}.
 #'   \itemize{
-#'     \item \code{NULL} (default): no sharing, backward compatible.
+#'     \item \code{NULL} (default): no sharing.
 #'     \item \code{TRUE}: all drugs in one sharing group.
 #'     \item A list of character vectors: explicit groups, e.g.
 #'       \code{list(c("Drug A", "Drug B"))}. Drug names must match the
 #'       \code{name} parameter from \code{define_regimen()}.
 #'   }
-#'   When active, adds \code{{Drug}_pre_sharing_admin_cost} diagnostic columns
-#'   showing original admin costs before sharing adjustment.
+#'   When active, adds \code{{Drug}_pre_sharing_admin_cost} and
+#'   \code{{Drug}_pre_sharing_dispensing_cost} diagnostic columns.
 #' @return See description.
 #'
 #' @export
@@ -81,9 +75,7 @@ calculate_med_costs <- function(
     model_cycle_length = 7,
     n_cycles           = 52,
     cycle_times        = NULL,
-    subcycle_precision = FALSE,
     daily_detail       = FALSE,
-    simple_daily_cost  = FALSE,
     shared_admin       = NULL
 ) {
     regimens <- list(...)
@@ -96,627 +88,307 @@ calculate_med_costs <- function(
         stop("All unnamed arguments must be med_regimen objects.")
     }
 
-    shared_args <- list(
-        model_cycle_length = model_cycle_length,
-        n_cycles           = n_cycles,
-        cycle_times        = cycle_times,
-        subcycle_precision = subcycle_precision,
-        daily_detail       = daily_detail,
-        simple_daily_cost  = simple_daily_cost
-    )
+    cyc <- resolve_cycles(n_cycles, model_cycle_length, cycle_times)
 
-    # ── Single regimen: backward-compatible return ─────────────────────
+    # ── Single regimen ─────────────────────────────────────────────────
     if (length(regimens) == 1L) {
         if (!is.null(shared_admin) && !identical(shared_admin, FALSE)) {
             warning("`shared_admin` is ignored for single-regimen calls.",
                     call. = FALSE)
         }
-        result <- do.call(calculate_single_regimen,
-                          c(list(regimen = regimens[[1]]), shared_args))
-        cls <- if (daily_detail) "regimen_daily_detail" else "regimen_costs"
-        class(result) <- c(cls, class(result))
+        daily <- regimen_daily(regimens[[1]], cyc)
+        if (daily_detail) {
+            attr(daily, "n_dispensings") <- NULL
+            class(daily) <- c("regimen_daily_detail", class(daily))
+            return(daily)
+        }
+        result <- aggregate_daily(daily, cyc)
+        class(result) <- c("regimen_costs", class(result))
         return(result)
     }
 
     # ── Multiple regimens ──────────────────────────────────────────────
-    results <- lapply(regimens, function(reg) {
-        do.call(calculate_single_regimen,
-                c(list(regimen = reg), shared_args))
-    })
     drug_names <- vapply(regimens, function(r) r$name, character(1))
-    names(results) <- drug_names
-
-    # ── Validate shared_admin ────────────────────────────────────────
+    if (anyDuplicated(drug_names)) {
+        stop("Regimens in one call must have distinct names.", call. = FALSE)
+    }
     shared_admin <- validate_shared_admin(shared_admin, drug_names)
+    # Column prefixes: cleaned names, made unique in input order
+    prefix <- stats::setNames(make.unique(safe_name(drug_names), sep = "_"),
+                              drug_names)
 
-    # ── Shared admin branch ──────────────────────────────────────────
-    if (!is.null(shared_admin)) {
-        # Force daily computation internally
-        daily_args <- list(
-            model_cycle_length = model_cycle_length,
-            n_cycles           = n_cycles,
-            cycle_times        = cycle_times,
-            subcycle_precision = TRUE,
-            daily_detail       = TRUE,
-            simple_daily_cost  = simple_daily_cost
-        )
-        daily_results <- lapply(regimens, function(reg) {
-            do.call(calculate_single_regimen,
-                    c(list(regimen = reg), daily_args))
-        })
-        names(daily_results) <- drug_names
+    dailies <- lapply(regimens, regimen_daily, cyc = cyc)
+    names(dailies) <- drug_names
 
-        # Build wide-format daily data
-        base <- daily_results[[1]][, c("day", "model_cycle")]
-        drug_columns <- list()
-        for (i in seq_along(daily_results)) {
-            res <- daily_results[[i]]
-            nm <- gsub("[^a-zA-Z0-9]", "_", drug_names[i])
-            per_drug_cols <- setdiff(names(res), c("day", "model_cycle"))
-            prefixed <- paste0(nm, "_", per_drug_cols)
-            drug_columns[[drug_names[i]]] <- prefixed
-            for (j in seq_along(per_drug_cols)) {
-                base[[prefixed[j]]] <- res[[per_drug_cols[j]]]
-            }
+    base <- dailies[[1]][, c("day", "model_cycle")]
+    drug_columns <- list()
+    for (i in seq_along(dailies)) {
+        res <- dailies[[i]]
+        nm <- prefix[[drug_names[i]]]
+        per_drug_cols <- setdiff(names(res), c("day", "model_cycle"))
+        prefixed <- paste0(nm, "_", per_drug_cols)
+        drug_columns[[drug_names[i]]] <- prefixed
+        for (j in seq_along(per_drug_cols)) {
+            base[[prefixed[j]]] <- res[[per_drug_cols[j]]]
         }
-        tc_cols <- grep("_total_cost$", names(base), value = TRUE)
-        base$total_cost <- rowSums(base[, tc_cols, drop = FALSE])
-
-        # Apply admin sharing
-        base <- apply_admin_sharing(base, shared_admin, drug_names)
-
-        # Update drug_columns to include pre_sharing_admin_cost columns
-        grouped_drugs <- unlist(shared_admin)
-        for (drug in grouped_drugs) {
-            nm <- gsub("[^a-zA-Z0-9]", "_", drug)
-            pre_col <- paste0(nm, "_pre_sharing_admin_cost")
-            # Insert pre_sharing column before admin_cost in the drug's columns
-            cols <- drug_columns[[drug]]
-            admin_idx <- which(cols == paste0(nm, "_admin_cost"))
-            if (length(admin_idx) > 0L) {
-                drug_columns[[drug]] <- append(cols, pre_col,
-                                               after = admin_idx - 1L)
-            } else {
-                drug_columns[[drug]] <- c(cols, pre_col)
-            }
-        }
-
-        # Reorder columns so each drug's columns are grouped together
-        col_order <- c("day", "model_cycle",
-                       unlist(drug_columns, use.names = FALSE),
-                       "total_cost")
-        base <- base[, col_order]
-
-        if (daily_detail) {
-            attr(base, "drug_names")    <- drug_names
-            attr(base, "drug_columns")  <- drug_columns
-            attr(base, "shared_admin")  <- shared_admin
-            class(base) <- c("combo_regimen_daily_detail", "data.frame")
-            return(base)
-        }
-
-        # Aggregate to cycle level
-        cyc_agg <- resolve_cycles(n_cycles, model_cycle_length, cycle_times)
-        agg_cycle_starts <- cyc_agg$cycle_starts
-        agg_cycle_ends   <- cyc_agg$cycle_ends
-        n_agg            <- cyc_agg$n_cycles
-
-        cycle_result <- aggregate_shared_daily_to_cycle(
-            base, drug_names, shared_admin,
-            agg_cycle_starts, agg_cycle_ends
-        )
-        attr(cycle_result, "drug_names")   <- drug_names
-        attr(cycle_result, "shared_admin") <- shared_admin
-        class(cycle_result) <- c("combo_regimen_costs", class(cycle_result))
-        return(cycle_result)
     }
 
-    # daily_detail = TRUE: return wide-format data.frame
-    if (daily_detail) {
-        base <- results[[1]][, c("day", "model_cycle")]
-        drug_columns <- list()
-
-        for (i in seq_along(results)) {
-            res <- results[[i]]
-            nm <- gsub("[^a-zA-Z0-9]", "_", drug_names[i])
-            per_drug_cols <- setdiff(names(res), c("day", "model_cycle"))
-            prefixed <- paste0(nm, "_", per_drug_cols)
-            drug_columns[[drug_names[i]]] <- prefixed
-            for (j in seq_along(per_drug_cols)) {
-                base[[prefixed[j]]] <- res[[per_drug_cols[j]]]
+    if (!is.null(shared_admin)) {
+        base <- apply_admin_sharing(base, shared_admin, drug_names, prefix)
+        for (drug in unlist(shared_admin)) {
+            nm <- prefix[[drug]]
+            for (fee in c("admin_cost", "dispensing_cost")) {
+                pre_col <- paste0(nm, "_pre_sharing_", fee)
+                cols <- drug_columns[[drug]]
+                idx <- which(cols == paste0(nm, "_", fee))
+                drug_columns[[drug]] <- append(cols, pre_col, after = idx - 1L)
             }
         }
+    }
+    tc_cols <- paste0(prefix, "_total_cost")
+    base$total_cost <- rowSums(base[, tc_cols, drop = FALSE])
+    base <- base[, c("day", "model_cycle",
+                     unlist(drug_columns, use.names = FALSE), "total_cost")]
 
-        tc_cols <- grep("_total_cost$", names(base), value = TRUE)
-        base$total_cost <- rowSums(base[, tc_cols, drop = FALSE])
-
-        attr(base, "drug_names") <- drug_names
+    if (daily_detail) {
+        attr(base, "drug_names")   <- drug_names
         attr(base, "drug_columns") <- drug_columns
+        attr(base, "shared_admin") <- shared_admin
         class(base) <- c("combo_regimen_daily_detail", "data.frame")
         return(base)
     }
 
-    # Aggregate into wide-format data.frame
-    base <- results[[1]][, c("cycle", "cycle_start_day", "cycle_end_day")]
-
-    for (i in seq_along(results)) {
-        res <- results[[i]]
-        nm  <- gsub("[^a-zA-Z0-9]", "_", drug_names[i])
-        base[[paste0(nm, "_drug_cost")]]  <- res$drug_cost
-        base[[paste0(nm, "_admin_cost")]] <- res$admin_cost
-        base[[paste0(nm, "_total_cost")]] <- res$total_cost
+    out <- data.frame(
+        cycle           = seq_len(cyc$n_cycles),
+        cycle_start_day = cyc$cycle_starts,
+        cycle_end_day   = cyc$cycle_ends
+    )
+    cycle_columns <- list()
+    for (drug in drug_names) {
+        nm <- prefix[[drug]]
+        cost_cols <- c("drug_cost", "admin_cost", "dispensing_cost")
+        if (drug %in% unlist(shared_admin)) {
+            cost_cols <- c("drug_cost", "pre_sharing_admin_cost", "admin_cost",
+                           "pre_sharing_dispensing_cost", "dispensing_cost")
+        }
+        cols <- paste0(nm, "_", c(cost_cols, "total_cost"))
+        cycle_columns[[drug]] <- cols
+        for (col in cols) {
+            out[[col]] <- sum_by_cycle(base[[col]], base$model_cycle,
+                                       cyc$n_cycles)
+        }
     }
+    out$total_cost <- rowSums(out[, tc_cols, drop = FALSE])
 
-    cost_cols <- grep("_total_cost$", names(base), value = TRUE)
-    base$total_cost <- rowSums(base[, cost_cols, drop = FALSE])
-
-    attr(base, "drug_names") <- drug_names
-    class(base) <- c("combo_regimen_costs", class(base))
-    base
+    attr(out, "drug_names")   <- drug_names
+    attr(out, "drug_columns") <- cycle_columns
+    attr(out, "shared_admin") <- shared_admin
+    class(out) <- c("combo_regimen_costs", class(out))
+    out
 }
 
 
-#' Internal helper: calculate costs for a single regimen
+# Column-safe version of a drug name.
+safe_name <- function(x) gsub("[^a-zA-Z0-9]", "_", x)
+
+# Sum a row vector into model cycles (rows outside the model are dropped).
+sum_by_cycle <- function(values, model_cycle, n_cycles) {
+    keep <- !is.na(model_cycle)
+    out <- numeric(n_cycles)
+    s <- tapply(values[keep], factor(model_cycle[keep], levels = seq_len(n_cycles)),
+                sum)
+    s[is.na(s)] <- 0
+    out[] <- as.numeric(s)
+    out
+}
+
+# Which interval [starts[i], starts[i + 1]) contains each point (NA before
+# the first start). A small tolerance keeps a point computed as a boundary
+# (e.g. 2 x 30.4375) from falling just before it.
+interval_of <- function(t, starts) {
+    i <- findInterval(t + 1e-9 * pmax(1, abs(t)), starts)
+    i[i < 1L] <- NA_integer_
+    i
+}
+
+
+#' Treatment events of a regimen
 #'
-#' @param regimen A \code{med_regimen} object.
-#' @param model_cycle_length Numeric model cycle length in days.
-#' @param n_cycles Integer number of model cycles.
-#' @param cycle_times Numeric vector of cycle start times.
-#' @param subcycle_precision Logical.
-#' @param daily_detail Logical.
-#' @param simple_daily_cost Logical.
+#' Every dispensing (day 1 of a medication cycle) and every administration
+#' is a point in continuous time. Medication cycle k starts at
+#' \code{start_day + (k - 1) * med_cycle_length}; administration day d of that
+#' cycle is at the cycle start + (d - 1). Events at or after the end of
+#' treatment or the model horizon are excluded.
+#'
+#' @param reg A med_regimen object.
+#' @param horizon Model horizon (day).
+#' @return list(dispensing = data.frame(time, med_cycle),
+#'   admin = data.frame(time, med_cycle, med_cycle_day), treat_end)
+#' @keywords internal
+regimen_events <- function(reg, horizon) {
+    mcl <- reg$med_cycle_length
+    start_day <- reg$start_day %||% 0
+    treat_end <- if (is.finite(reg$max_med_cycles)) {
+        start_day + reg$max_med_cycles * mcl
+    } else Inf
+    eff_end <- min(treat_end, horizon)
+    n_med <- max(0, ceiling((eff_end - start_day) / mcl))
+    k <- seq_len(n_med)
+    starts <- start_day + (k - 1) * mcl
+    keep <- starts < eff_end
+    disp <- data.frame(time = starts[keep], med_cycle = k[keep])
+    ad <- reg$admin_days
+    admin <- data.frame(
+        time = as.vector(outer(ad - 1, disp$time, "+")),
+        med_cycle = rep(disp$med_cycle, each = length(ad)),
+        med_cycle_day = rep(ad, times = nrow(disp))
+    )
+    admin <- admin[admin$time < eff_end, , drop = FALSE]
+    admin <- admin[order(admin$time), , drop = FALSE]
+    rownames(admin) <- NULL
+    list(dispensing = disp, admin = admin, treat_end = treat_end)
+}
+
+
+#' Day intervals of the model timeline
+#'
+#' One row per day interval [d, d + 1) from day 0 to the model horizon, cut
+#' at model-cycle boundaries, so that every row lies in exactly one model
+#' cycle.
+#'
+#' @param cyc Output of \code{resolve_cycles()}.
+#' @return data.frame(day, from, to, model_cycle)
+#' @keywords internal
+day_intervals <- function(cyc) {
+    horizon <- max(cyc$cycle_ends)
+    n_days <- max(ceiling(horizon - 1e-9 * max(1, horizon)), 1)
+    bounds <- c(cyc$cycle_starts, cyc$cycle_ends)
+    bounds <- bounds[bounds > 0 & bounds < horizon]
+    # Drop boundaries that coincide with a whole day
+    bounds <- bounds[abs(bounds - round(bounds)) > 1e-9 * pmax(1, bounds)]
+    cuts <- sort(unique(c(seq.int(0, n_days - 1), bounds)))
+    to <- c(cuts[-1], horizon)
+    keep <- to > cuts
+    cuts <- cuts[keep]
+    to <- to[keep]
+    data.frame(
+        day = as.integer(floor(cuts + 1e-9 * pmax(1, cuts))),
+        from = cuts,
+        to = to,
+        model_cycle = interval_of(cuts, cyc$cycle_starts)
+    )
+}
+
+
+#' Day-level cost detail for one regimen
+#'
+#' One row per day interval (cut at model-cycle boundaries; see
+#' \code{day_intervals()}). Each administration and dispensing is a point in
+#' time and is attributed to the row whose interval contains it. Drug cost is
+#' placed on administrations (\code{"per_admin"}) or on medication-cycle
+#' starts (\code{"per_dispensing"}); \code{admin_cost} on administrations;
+#' \code{dispensing_cost} on medication-cycle starts. Dose and unit columns
+#' (\code{mg_taken}, \code{units_dispensed}, \code{mg_dispensed}) are
+#' included only for a fixed dose; with a patient distribution the drug cost
+#' is an expected value (see \code{diagnose_dosing()}). Under
+#' \code{no_wastage}, \code{units_dispensed} is omitted and
+#' \code{mg_dispensed} is the prescribed mg that is costed.
+#'
+#' @param reg A med_regimen object.
+#' @param cyc Output of \code{resolve_cycles()}.
+#' @return A data.frame, with attribute \code{n_dispensings} (dispensings
+#'   per row).
+#' @keywords internal
+regimen_daily <- function(reg, cyc) {
+    stopifnot(inherits(reg, "med_regimen"))
+    rows <- day_intervals(cyc)
+    horizon <- max(cyc$cycle_ends)
+    ev <- regimen_events(reg, horizon)
+    n_rows <- nrow(rows)
+
+    row_of <- function(t) findInterval(t + 1e-9 * pmax(1, abs(t)), rows$from)
+    admin_row <- row_of(ev$admin$time)
+    disp_row <- row_of(ev$dispensing$time)
+    doses <- tabulate(admin_row, nbins = n_rows)
+    disp <- tabulate(disp_row, nbins = n_rows)
+
+    # Medication cycle position of each row: that of its administration if
+    # it has one, else of the treatment time at the start of the row.
+    start_day <- reg$start_day %||% 0
+    mcl <- reg$med_cycle_length
+    t_end <- min(ev$treat_end, horizon)
+    on_tx <- rows$to > start_day & rows$from < t_end
+    x <- pmax(rows$from, start_day)
+    since <- x - start_day
+    med_cycle <- floor(since / mcl + 1e-9) + 1
+    med_cycle_day <- floor(since - (med_cycle - 1) * mcl + 1e-9) + 1
+    med_cycle[admin_row] <- ev$admin$med_cycle
+    med_cycle_day[admin_row] <- ev$admin$med_cycle_day
+    med_cycle[!on_tx] <- NA
+    med_cycle_day[!on_tx] <- NA
+
+    n_admin_cycle <- length(reg$admin_days)
+    admin_fee <- doses * reg$admin_cost
+    disp_fee  <- disp * reg$dispensing_cost
+
+    per_dose <- cost_single_admin_drug(reg)
+    n_dose_costed <- if (reg$charge_timing == "per_admin") {
+        doses
+    } else {
+        disp * n_admin_cycle
+    }
+    drug <- n_dose_costed * per_dose
+    out <- data.frame(
+        day = rows$day, model_cycle = rows$model_cycle,
+        med_cycle = med_cycle, med_cycle_day = med_cycle_day,
+        doses_taken = doses
+    )
+
+    # Dose and unit columns only where they describe what is costed: not
+    # with a patient distribution (the cost is an average over patients;
+    # see diagnose_dosing()), and no units under no_wastage (the cost is a
+    # price per mg).
+    if (is.null(regimen_distribution(reg))) {
+        detail <- cost_single_dose(reg$actual_dose_mg, reg)
+        out$mg_taken <- doses * detail$given_mg
+        if (reg$no_wastage) {
+            out$mg_dispensed <- n_dose_costed * detail$prescribed_mg
+        } else {
+            out$units_dispensed <- n_dose_costed * sum(detail$units)
+            out$mg_dispensed <- n_dose_costed * detail$dispensed_mg
+        }
+    }
+
+    out$drug_cost <- drug
+    out$admin_cost <- admin_fee
+    out$dispensing_cost <- disp_fee
+    out$total_cost <- drug + admin_fee + disp_fee
+    attr(out, "n_dispensings") <- disp
+    out
+}
+
+
+#' Aggregate a single regimen's daily detail into model cycles
+#'
+#' @param daily Output of \code{regimen_daily()}.
+#' @param cyc Output of \code{resolve_cycles()}.
 #' @return A data.frame.
 #' @keywords internal
-calculate_single_regimen <- function(
-    regimen,
-    model_cycle_length = 7,
-    n_cycles           = 52,
-    cycle_times        = NULL,
-    subcycle_precision = FALSE,
-    daily_detail       = FALSE,
-    simple_daily_cost  = FALSE
-) {
-    stopifnot(inherits(regimen, "med_regimen"))
-
-    # daily_detail implies subcycle_precision
-    if (daily_detail) subcycle_precision <- TRUE
-
-    # ── Resolve cycle_times ──────────────────────────────────────────────
-    cyc <- resolve_cycles(n_cycles, model_cycle_length, cycle_times)
-    n_cycles     <- cyc$n_cycles
-    cycle_starts <- cyc$cycle_starts
-    cycle_ends   <- cyc$cycle_ends
-
-    start_day <- regimen$start_day %||% 0
-
-    # ── MODE 1: Simple cost-per-day ──────────────────────────────────────
-    if (simple_daily_cost && !is.null(regimen$cost_per_day)) {
-        daily_cost <- regimen$cost_per_day
-        cycle_lengths <- cycle_ends - cycle_starts
-        drug_cost_per_cycle <- daily_cost * cycle_lengths
-        daily_admin_cost <- regimen$admin_cost / regimen$med_cycle_length
-        admin_cost_per_cycle <- daily_admin_cost * cycle_lengths
-        out <- data.frame(
-            cycle             = seq_len(n_cycles),
-            cycle_start_day   = cycle_starts,
-            cycle_end_day     = cycle_ends,
-            drug_cost         = drug_cost_per_cycle,
-            admin_cost        = admin_cost_per_cycle,
-            total_cost        = drug_cost_per_cycle + admin_cost_per_cycle
-        )
-        # Zero out cycles entirely before start_day
-        before <- cycle_ends <= start_day
-        out$drug_cost[before]  <- 0
-        out$admin_cost[before] <- 0
-        out$total_cost[before] <- 0
-        if (is.finite(regimen$max_med_cycles)) {
-            max_day <- start_day + regimen$max_med_cycles * regimen$med_cycle_length
-            beyond  <- cycle_starts >= max_day
-            out$drug_cost[beyond]  <- 0
-            out$admin_cost[beyond] <- 0
-            out$total_cost[beyond] <- 0
-        }
-        return(out)
-    }
-
-    # ── Pre-compute costs ────────────────────────────────────────────────
-    single_drug_cost <- cost_single_admin_drug(regimen)
-    single_adm_cost  <- regimen$admin_cost
-
-    # Treatment cap in days
-    if (is.finite(regimen$max_med_cycles)) {
-        treat_end <- start_day + regimen$max_med_cycles * regimen$med_cycle_length
-    } else {
-        treat_end <- Inf
-    }
-
-    # ──────────────────────────────────────────────────────────────────────
-    # ORAL WASTAGE PATH
-    # ──────────────────────────────────────────────────────────────────────
-    if (regimen$oral_wastage) {
-        return(calculate_oral_wastage(
-            regimen, n_cycles, cycle_starts, cycle_ends,
-            model_cycle_length, single_drug_cost, single_adm_cost,
-            treat_end, subcycle_precision, daily_detail
-        ))
-    }
-
-    # ──────────────────────────────────────────────────────────────────────
-    # PER-ADMINISTRATION PATH (IV, or oral without wastage)
-    # ──────────────────────────────────────────────────────────────────────
-    calculate_per_admin(
-        regimen, n_cycles, cycle_starts, cycle_ends,
-        model_cycle_length, single_drug_cost, single_adm_cost,
-        treat_end, subcycle_precision, daily_detail
-    )
-}
-
-
-#' Oral wastage costing path
-#'
-#' When oral_wastage = TRUE, the costing unit is the *medication cycle
-#' dispensing event*, not the individual administration. At the start of
-#' each medication cycle (day 1), the full cycle's worth of tablets is
-#' dispensed and paid for. The cost is assigned to whichever model cycle
-#' contains that dispensing day.
-#'
-#' @param regimen A med_regimen object.
-#' @param n_cycles Integer number of model cycles.
-#' @param cycle_starts Numeric vector of model cycle start days.
-#' @param cycle_ends Numeric vector of model cycle end days.
-#' @param model_cycle_length Numeric model cycle length in days.
-#' @param single_drug_cost Numeric drug cost per administration.
-#' @param single_adm_cost Numeric admin cost per event.
-#' @param treat_end Numeric treatment end day.
-#' @param subcycle_precision Logical for sub-cycle precision.
-#' @param daily_detail Logical for daily detail output.
-#' @return A data.frame.
-#' @keywords internal
-calculate_oral_wastage <- function(
-    regimen, n_cycles, cycle_starts, cycle_ends,
-    model_cycle_length, single_drug_cost, single_adm_cost,
-    treat_end, subcycle_precision, daily_detail
-) {
-    dispensing_cost <- cost_oral_cycle_dispensing(regimen)
-    mcl <- regimen$med_cycle_length
-    start_day <- regimen$start_day %||% 0
-
-    if (subcycle_precision) {
-        horizon <- max(cycle_ends)
-        eff_treat_end <- if (is.finite(treat_end)) treat_end else horizon
-
-        treat_duration <- max(0, eff_treat_end - start_day)
-        n_med_cycles <- ceiling(treat_duration / mcl)
-        dispensing_days <- start_day + (seq_len(n_med_cycles) - 1L) * mcl
-
-        dispensing_days <- dispensing_days[
-            dispensing_days < eff_treat_end &
-            dispensing_days < horizon
-        ]
-
-        cycle_idx <- findInterval(dispensing_days, cycle_starts,
-                                  rightmost.closed = FALSE)
-        cycle_idx <- pmin(cycle_idx, n_cycles)
-
-        disp_counts <- tabulate(cycle_idx, nbins = n_cycles)
-
-        # ── Daily detail ─────────────────────────────────────────────
-        if (daily_detail) {
-            return(build_oral_wastage_daily(
-                regimen, n_cycles, cycle_starts, mcl,
-                eff_treat_end, horizon, dispensing_days, n_med_cycles,
-                dispensing_cost, single_adm_cost
-            ))
-        }
-
-    } else {
-        # ── Analytic: count dispensing events per model cycle
-        effective_end <- pmin(cycle_ends, treat_end)
-
-        k_lo <- ceiling((cycle_starts - start_day) / mcl)
-        k_hi <- ceiling((effective_end - start_day) / mcl) - 1L
-        k_lo <- pmax(k_lo, 0L)
-        disp_counts <- pmax(k_hi - k_lo + 1L, 0L)
-    }
-
-    # Calculate tablets per dispensing for reporting
-    admin_res <- cost_oral_single(
-        dose_mg             = regimen$actual_dose_mg,
-        available_strengths = regimen$available_strengths,
-        cost_per_tablet     = if (is.null(names(regimen$unit_cost)))
-                                  regimen$unit_cost else NULL,
-        cost_per_strength   = if (!is.null(names(regimen$unit_cost)))
-                                  regimen$unit_cost else NULL
-    )
-    tabs_per_admin <- sum(admin_res$tablets)
-    tabs_per_dispensing <- tabs_per_admin * length(regimen$admin_days)
-
+aggregate_daily <- function(daily, cyc) {
+    n <- cyc$n_cycles
+    mc <- daily$model_cycle
     data.frame(
-        cycle                = seq_len(n_cycles),
-        cycle_start_day      = cycle_starts,
-        cycle_end_day        = cycle_ends,
-        n_dispensing_events  = disp_counts,
-        n_tablets_dispensed  = disp_counts * tabs_per_dispensing,
-        drug_cost            = disp_counts * dispensing_cost,
-        admin_cost           = disp_counts * single_adm_cost,
-        total_cost           = disp_counts * (dispensing_cost +
-                                              single_adm_cost)
+        cycle             = seq_len(n),
+        cycle_start_day   = cyc$cycle_starts,
+        cycle_end_day     = cyc$cycle_ends,
+        n_administrations = as.integer(sum_by_cycle(daily$doses_taken, mc, n)),
+        n_dispensings     = as.integer(sum_by_cycle(
+            attr(daily, "n_dispensings"), mc, n)),
+        drug_cost         = sum_by_cycle(daily$drug_cost, mc, n),
+        admin_cost        = sum_by_cycle(daily$admin_cost, mc, n),
+        dispensing_cost   = sum_by_cycle(daily$dispensing_cost, mc, n),
+        total_cost        = sum_by_cycle(daily$total_cost, mc, n)
     )
-}
-
-
-#' Build daily detail data frame for oral wastage path
-#'
-#' @param regimen A med_regimen object.
-#' @param n_cycles Integer number of model cycles.
-#' @param cycle_starts Numeric vector of model cycle start days.
-#' @param mcl Medication cycle length.
-#' @param eff_treat_end Effective treatment end day.
-#' @param horizon Model horizon in days.
-#' @param dispensing_days Numeric vector of dispensing day indices.
-#' @param n_med_cycles Number of medication cycles.
-#' @param dispensing_cost Drug cost per dispensing event.
-#' @param single_adm_cost Admin cost per event.
-#' @return A data.frame with one row per day.
-#' @keywords internal
-build_oral_wastage_daily <- function(
-    regimen, n_cycles, cycle_starts, mcl,
-    eff_treat_end, horizon, dispensing_days, n_med_cycles,
-    dispensing_cost, single_adm_cost
-) {
-    start_day <- regimen$start_day %||% 0
-    mc_starts <- start_day + (seq_len(n_med_cycles) - 1L) * mcl
-    mc_starts <- mc_starts[mc_starts < eff_treat_end &
-                           mc_starts < horizon]
-    all_admin <- as.vector(
-        outer(regimen$admin_days - 1L, mc_starts, "+")
-    )
-    all_admin <- sort(all_admin[all_admin < eff_treat_end &
-                                all_admin < horizon])
-
-    # Per-admin detail
-    if (!is.null(names(regimen$unit_cost))) {
-        tab_res <- cost_oral_single(
-            regimen$actual_dose_mg,
-            regimen$available_strengths,
-            cost_per_strength = regimen$unit_cost)
-    } else {
-        tab_res <- cost_oral_single(
-            regimen$actual_dose_mg,
-            regimen$available_strengths,
-            cost_per_tablet = regimen$unit_cost)
-    }
-    tabs_per_admin   <- sum(tab_res$tablets)
-    mg_dispensed_per_admin <- sum(
-        tab_res$tablets * regimen$available_strengths[
-            order(regimen$available_strengths, decreasing = TRUE)])
-    cost_per_admin   <- tab_res$drug_cost
-
-    n_admin_per_cyc  <- length(regimen$admin_days)
-    tabs_per_disp    <- tabs_per_admin * n_admin_per_cyc
-    mg_disp_per_disp <- mg_dispensed_per_admin * n_admin_per_cyc
-
-    all_days <- seq(0L, horizon - 1L)
-    day_model_cycle <- pmin(
-        findInterval(all_days, cycle_starts), n_cycles)
-    days_since_start  <- all_days - start_day
-    day_med_cycle     <- floor(days_since_start / mcl) + 1L
-    day_med_cycle_day <- (days_since_start %% mcl) + 1L
-
-    is_disp  <- all_days %in% dispensing_days
-    is_admin <- all_days %in% all_admin
-    on_tx    <- all_days >= start_day & all_days < eff_treat_end
-
-    doses_taken <- as.integer(is_admin & on_tx)
-    mg_taken    <- doses_taken * regimen$actual_dose_mg
-    mg_dispensed_today <- ifelse(is_disp & on_tx, mg_disp_per_disp, 0)
-    tabs_taken  <- doses_taken * tabs_per_admin
-
-    doses_costed <- ifelse(is_disp & on_tx, n_admin_per_cyc, 0L)
-    tabs_costed  <- ifelse(is_disp & on_tx, tabs_per_disp, 0L)
-    mg_costed    <- ifelse(is_disp & on_tx, mg_disp_per_disp, 0)
-    drug_cost    <- ifelse(is_disp & on_tx, dispensing_cost, 0)
-    admin_cost   <- ifelse(is_disp & on_tx, single_adm_cost, 0)
-
-    data.frame(
-        day             = all_days,
-        model_cycle     = day_model_cycle,
-        med_cycle       = ifelse(on_tx, day_med_cycle, NA_integer_),
-        med_cycle_day   = ifelse(on_tx, day_med_cycle_day, NA_integer_),
-        doses_taken     = doses_taken,
-        tabs_taken      = tabs_taken,
-        mg_taken        = mg_taken,
-        doses_dispensed = doses_costed,
-        tabs_dispensed  = tabs_costed,
-        mg_dispensed    = mg_costed,
-        drug_cost       = drug_cost,
-        admin_cost      = admin_cost,
-        total_cost      = drug_cost + admin_cost,
-        stringsAsFactors = FALSE
-    )
-}
-
-
-#' Per-administration costing path (IV, or oral without wastage)
-#'
-#' @param regimen A med_regimen object.
-#' @param n_cycles Integer number of model cycles.
-#' @param cycle_starts Numeric vector of model cycle start days.
-#' @param cycle_ends Numeric vector of model cycle end days.
-#' @param model_cycle_length Numeric model cycle length in days.
-#' @param single_drug_cost Numeric drug cost per administration.
-#' @param single_adm_cost Numeric admin cost per event.
-#' @param treat_end Numeric treatment end day.
-#' @param subcycle_precision Logical for sub-cycle precision.
-#' @param daily_detail Logical for daily detail output.
-#' @return A data.frame.
-#' @keywords internal
-calculate_per_admin <- function(
-    regimen, n_cycles, cycle_starts, cycle_ends,
-    model_cycle_length, single_drug_cost, single_adm_cost,
-    treat_end, subcycle_precision, daily_detail
-) {
-    start_day <- regimen$start_day %||% 0
-
-    if (subcycle_precision) {
-        horizon <- max(cycle_ends)
-        eff_treat_end <- if (is.finite(treat_end)) treat_end else horizon
-
-        treat_duration <- max(0, min(eff_treat_end, horizon) - start_day)
-        n_full_med_cycles <- ceiling(treat_duration /
-                                     regimen$med_cycle_length)
-        med_cycle_offsets <- start_day + (seq_len(n_full_med_cycles) - 1) *
-                             regimen$med_cycle_length
-        all_admin_days <- as.vector(
-            outer(regimen$admin_days - 1, med_cycle_offsets, "+")
-        )
-        all_admin_days <- sort(
-            all_admin_days[all_admin_days < eff_treat_end &
-                           all_admin_days < horizon]
-        )
-
-        cycle_idx <- findInterval(all_admin_days, cycle_starts,
-                                  rightmost.closed = FALSE)
-        cycle_idx <- pmin(cycle_idx, n_cycles)
-
-        admin_counts <- tabulate(cycle_idx, nbins = n_cycles)
-
-        # For oral drugs, compute dispensing counts for admin_cost
-        if (regimen$route == "oral") {
-            dispensing_days <- med_cycle_offsets[
-                med_cycle_offsets < eff_treat_end &
-                med_cycle_offsets < horizon
-            ]
-            disp_cycle_idx <- findInterval(dispensing_days, cycle_starts,
-                                           rightmost.closed = FALSE)
-            disp_cycle_idx <- pmin(disp_cycle_idx, n_cycles)
-            disp_counts <- tabulate(disp_cycle_idx, nbins = n_cycles)
-        }
-
-        # ── Daily detail ─────────────────────────────────────────────
-        if (daily_detail) {
-            return(build_per_admin_daily(
-                regimen, n_cycles, cycle_starts, horizon,
-                eff_treat_end, all_admin_days,
-                single_drug_cost, single_adm_cost
-            ))
-        }
-    } else {
-        # ── Analytic: vectorized count over admin days
-        mcl   <- regimen$med_cycle_length
-        adays <- regimen$admin_days - 1L
-
-        effective_end <- pmin(cycle_ends, treat_end)
-        # Matrix: rows=cycles, cols=admin_days
-        a_matrix <- matrix(adays, nrow = n_cycles, ncol = length(adays), byrow = TRUE)
-        k_lo <- ceiling((cycle_starts - start_day - a_matrix) / mcl)
-        k_hi <- ceiling((effective_end - start_day - a_matrix) / mcl) - 1L
-        k_lo <- pmax(k_lo, 0L)
-        counts <- pmax(k_hi - k_lo + 1L, 0L)
-        admin_counts <- rowSums(counts)
-
-        # For oral drugs, compute dispensing counts for admin_cost
-        if (regimen$route == "oral") {
-            mcl_d <- regimen$med_cycle_length
-            k_lo_d <- ceiling((cycle_starts - start_day) / mcl_d)
-            k_hi_d <- ceiling((effective_end - start_day) / mcl_d) - 1L
-            k_lo_d <- pmax(k_lo_d, 0L)
-            disp_counts <- pmax(k_hi_d - k_lo_d + 1L, 0L)
-        }
-    }
-
-    # Compute admin_cost based on route
-    if (regimen$route == "oral") {
-        admin_cost_vec <- disp_counts * single_adm_cost
-    } else {
-        admin_cost_vec <- admin_counts * single_adm_cost
-    }
-
-    data.frame(
-        cycle             = seq_len(n_cycles),
-        cycle_start_day   = cycle_starts,
-        cycle_end_day     = cycle_ends,
-        n_administrations = admin_counts,
-        drug_cost         = admin_counts * single_drug_cost,
-        admin_cost        = admin_cost_vec,
-        total_cost        = admin_counts * single_drug_cost + admin_cost_vec
-    )
-}
-
-
-#' Build daily detail data frame for per-administration path
-#'
-#' @param regimen A med_regimen object.
-#' @param n_cycles Integer number of model cycles.
-#' @param cycle_starts Numeric vector of model cycle start days.
-#' @param horizon Model horizon in days.
-#' @param eff_treat_end Effective treatment end day.
-#' @param all_admin_days Numeric vector of all administration days.
-#' @param single_drug_cost Numeric drug cost per administration.
-#' @param single_adm_cost Numeric admin cost per event.
-#' @return A data.frame with one row per day.
-#' @keywords internal
-build_per_admin_daily <- function(
-    regimen, n_cycles, cycle_starts, horizon,
-    eff_treat_end, all_admin_days,
-    single_drug_cost, single_adm_cost
-) {
-    start_day <- regimen$start_day %||% 0
-    all_days <- seq(0L, horizon - 1L)
-    day_model_cycle <- pmin(
-        findInterval(all_days, cycle_starts), n_cycles)
-    days_since_start  <- all_days - start_day
-    day_med_cycle     <- floor(days_since_start / regimen$med_cycle_length) + 1L
-    day_med_cycle_day <- (days_since_start %% regimen$med_cycle_length) + 1L
-
-    is_admin     <- all_days %in% all_admin_days
-    on_tx        <- all_days >= start_day & all_days < eff_treat_end
-
-    doses_taken <- as.integer(is_admin & on_tx)
-
-    if (regimen$route %in% VIAL_ROUTES) {
-        iv_res <- cost_iv_single(
-            regimen$actual_dose_mg, regimen$vial_sizes,
-            regimen$vial_cost, regimen$wastage_threshold)
-        vials_per_admin  <- sum(iv_res$n_vials)
-        mg_given         <- regimen$actual_dose_mg
-        mg_from_vials    <- mg_given + iv_res$waste_mg
-
-        data.frame(
-            day             = all_days,
-            model_cycle     = day_model_cycle,
-            med_cycle       = ifelse(on_tx, day_med_cycle, NA_integer_),
-            med_cycle_day   = ifelse(on_tx, day_med_cycle_day, NA_integer_),
-            doses_taken     = doses_taken,
-            mg_taken        = doses_taken * mg_given,
-            mg_from_vials   = doses_taken * mg_from_vials,
-            mg_wasted       = doses_taken * iv_res$waste_mg,
-            vials_used      = doses_taken * vials_per_admin,
-            drug_cost       = doses_taken * single_drug_cost,
-            admin_cost      = doses_taken * single_adm_cost,
-            total_cost      = doses_taken * (single_drug_cost +
-                                             single_adm_cost),
-            stringsAsFactors = FALSE
-        )
-    } else {
-        # Oral no-wastage detail
-        is_disp <- day_med_cycle_day == 1L & on_tx
-        admin_cost_daily <- ifelse(is_disp, single_adm_cost, 0)
-
-        data.frame(
-            day             = all_days,
-            model_cycle     = day_model_cycle,
-            med_cycle       = ifelse(on_tx, day_med_cycle, NA_integer_),
-            med_cycle_day   = ifelse(on_tx, day_med_cycle_day, NA_integer_),
-            doses_taken     = doses_taken,
-            mg_taken        = doses_taken * regimen$actual_dose_mg,
-            drug_cost       = doses_taken * single_drug_cost,
-            admin_cost      = admin_cost_daily,
-            total_cost      = doses_taken * single_drug_cost +
-                              admin_cost_daily,
-            stringsAsFactors = FALSE
-        )
-    }
 }
 
 
@@ -724,7 +396,8 @@ build_per_admin_daily <- function(
 #'
 #' @param shared_admin NULL, TRUE, FALSE, or a list of character vectors.
 #' @param drug_names Character vector of drug names from the regimens.
-#' @return NULL (no sharing) or a list of character vectors (sharing groups).
+#' @return NULL (no sharing) or a list of character vectors (sharing groups),
+#'   each in input order.
 #' @keywords internal
 validate_shared_admin <- function(shared_admin, drug_names) {
     if (is.null(shared_admin) || identical(shared_admin, FALSE)) {
@@ -757,121 +430,54 @@ validate_shared_admin <- function(shared_admin, drug_names) {
                  call. = FALSE)
         }
     }
-    shared_admin
+    # Ties go to the first drug in input order, so order each group by input
+    lapply(shared_admin, function(grp) drug_names[drug_names %in% grp])
 }
 
 
-#' Apply administration cost sharing within groups
+#' Apply fee sharing within groups
 #'
-#' Operates on a wide-format daily data frame. For each sharing group, on days
-#' where more than one drug has admin_cost > 0, keeps only the highest cost
-#' (first by input order on ties) and zeros out the rest.
+#' Operates on a wide-format daily data frame. For each sharing group and each
+#' fee (\code{admin_cost}, \code{dispensing_cost}), on rows where more than
+#' one drug has that fee, keeps only the highest (first by input order on
+#' ties) and zeros out the rest.
 #'
 #' @param daily Wide-format daily data frame.
-#' @param sharing_groups List of character vectors (drug names).
+#' @param sharing_groups List of character vectors (drug names), each in
+#'   input order.
 #' @param drug_names Character vector of all drug names (in input order).
-#' @return The modified daily data frame with pre_sharing_admin_cost and
-#'   adjusted admin_cost columns.
+#' @param prefix Named character vector: column prefix for each drug name.
+#' @return The modified daily data frame with pre-sharing fee columns and
+#'   adjusted fee and total columns.
 #' @keywords internal
-apply_admin_sharing <- function(daily, sharing_groups, drug_names) {
-    # For every drug in a sharing group, copy admin_cost → pre_sharing_admin_cost
-    grouped_drugs <- unlist(sharing_groups)
-    for (drug in grouped_drugs) {
-        nm <- gsub("[^a-zA-Z0-9]", "_", drug)
-        admin_col <- paste0(nm, "_admin_cost")
-        pre_col   <- paste0(nm, "_pre_sharing_admin_cost")
-        daily[[pre_col]] <- daily[[admin_col]]
+apply_admin_sharing <- function(daily, sharing_groups, drug_names, prefix) {
+    fees <- c("admin_cost", "dispensing_cost")
+    for (drug in unlist(sharing_groups)) {
+        nm <- prefix[[drug]]
+        for (fee in fees) {
+            daily[[paste0(nm, "_pre_sharing_", fee)]] <- daily[[paste0(nm, "_", fee)]]
+        }
     }
-
-    # For each sharing group, zero out non-winners
     for (grp in sharing_groups) {
-        sanitized <- gsub("[^a-zA-Z0-9]", "_", grp)
-        admin_cols <- paste0(sanitized, "_admin_cost")
-
-        # Build matrix of admin costs for this group
-        admin_mat <- as.matrix(daily[, admin_cols, drop = FALSE])
-        has_admin <- admin_mat > 0
-        n_with_admin <- rowSums(has_admin)
-
-        # Rows where sharing applies (>1 drug with admin cost)
-        sharing_rows <- which(n_with_admin > 1L)
-
-        if (length(sharing_rows) > 0L) {
-            sub_mat <- admin_mat[sharing_rows, , drop = FALSE]
-            # Winner = column with max cost; ties broken by first (input order)
-            winner_col <- max.col(sub_mat, ties.method = "first")
-
-            # Zero out all, then restore winner
-            for (j in seq_along(admin_cols)) {
-                daily[sharing_rows, admin_cols[j]] <- 0
-            }
-            for (idx in seq_along(sharing_rows)) {
-                row_i <- sharing_rows[idx]
-                col_j <- winner_col[idx]
-                daily[row_i, admin_cols[col_j]] <- sub_mat[idx, col_j]
+        grp_prefix <- prefix[grp]
+        for (fee in fees) {
+            cols <- paste0(grp_prefix, "_", fee)
+            mat <- as.matrix(daily[, cols, drop = FALSE])
+            rows <- which(rowSums(mat > 0) > 1L)
+            if (length(rows) == 0L) next
+            sub <- mat[rows, , drop = FALSE]
+            winner <- max.col(sub, ties.method = "first")
+            for (j in seq_along(cols)) daily[rows, cols[j]] <- 0
+            for (idx in seq_along(rows)) {
+                daily[rows[idx], cols[winner[idx]]] <- sub[idx, winner[idx]]
             }
         }
     }
-
-    # Recompute per-drug total_cost and combined total_cost
     for (drug in drug_names) {
-        nm <- gsub("[^a-zA-Z0-9]", "_", drug)
-        drug_cost_col  <- paste0(nm, "_drug_cost")
-        admin_cost_col <- paste0(nm, "_admin_cost")
-        total_cost_col <- paste0(nm, "_total_cost")
-        daily[[total_cost_col]] <- daily[[drug_cost_col]] + daily[[admin_cost_col]]
+        nm <- prefix[[drug]]
+        daily[[paste0(nm, "_total_cost")]] <- daily[[paste0(nm, "_drug_cost")]] +
+            daily[[paste0(nm, "_admin_cost")]] +
+            daily[[paste0(nm, "_dispensing_cost")]]
     }
-    tc_cols <- paste0(gsub("[^a-zA-Z0-9]", "_", drug_names), "_total_cost")
-    daily$total_cost <- rowSums(daily[, tc_cols, drop = FALSE])
-
     daily
-}
-
-
-#' Aggregate shared daily data to cycle level
-#'
-#' Groups daily post-sharing data by model_cycle and sums cost columns.
-#'
-#' @param daily Wide-format daily data frame (post-sharing).
-#' @param drug_names Character vector of all drug names.
-#' @param sharing_groups List of character vectors (drug names in sharing groups).
-#' @param cycle_starts Numeric vector of cycle start days.
-#' @param cycle_ends Numeric vector of cycle end days.
-#' @return A cycle-level data frame.
-#' @keywords internal
-aggregate_shared_daily_to_cycle <- function(daily, drug_names, sharing_groups,
-                                            cycle_starts, cycle_ends) {
-    n_cycles <- length(cycle_starts)
-    grouped_drugs <- unlist(sharing_groups)
-
-    base <- data.frame(
-        cycle           = seq_len(n_cycles),
-        cycle_start_day = cycle_starts,
-        cycle_end_day   = cycle_ends
-    )
-
-    for (drug in drug_names) {
-        nm <- gsub("[^a-zA-Z0-9]", "_", drug)
-        drug_cost_col  <- paste0(nm, "_drug_cost")
-        admin_cost_col <- paste0(nm, "_admin_cost")
-        total_cost_col <- paste0(nm, "_total_cost")
-
-        base[[drug_cost_col]]  <- as.numeric(tapply(daily[[drug_cost_col]],
-                                         daily$model_cycle, sum))
-        base[[admin_cost_col]] <- as.numeric(tapply(daily[[admin_cost_col]],
-                                         daily$model_cycle, sum))
-
-        if (drug %in% grouped_drugs) {
-            pre_col <- paste0(nm, "_pre_sharing_admin_cost")
-            base[[pre_col]] <- as.numeric(tapply(daily[[pre_col]],
-                                      daily$model_cycle, sum))
-        }
-
-        base[[total_cost_col]] <- base[[drug_cost_col]] + base[[admin_cost_col]]
-    }
-
-    tc_cols <- paste0(gsub("[^a-zA-Z0-9]", "_", drug_names), "_total_cost")
-    base$total_cost <- rowSums(base[, tc_cols, drop = FALSE])
-
-    base
 }

@@ -39,9 +39,11 @@ drug_day1 <- define_regimen(
   med_cycle_length = 21,
   admin_days = c(1),
   max_med_cycles = 6,
-  vial_sizes = c(50, 100),
-  vial_cost = c(5.21, 10.42),
-  wastage_threshold = 0.1,
+  unit_size = c(50, 100),
+  unit_cost = c(5.21, 10.42),
+  exact = FALSE,
+  max_dose_rounding = 0.1,
+  charge_timing = "per_admin",
   admin_cost = 241
 )
 
@@ -55,9 +57,11 @@ drug_day1_8 <- define_regimen(
   med_cycle_length = 21,
   admin_days = c(1, 8),
   max_med_cycles = 6,
-  vial_sizes = c(200, 1000, 2000),
-  vial_cost = c(3.80, 15.95, 31.90),
-  wastage_threshold = 0.1,
+  unit_size = c(200, 1000, 2000),
+  unit_cost = c(3.80, 15.95, 31.90),
+  exact = FALSE,
+  max_dose_rounding = 0.1,
+  charge_timing = "per_admin",
   admin_cost = 241
 )
 ```
@@ -94,7 +98,7 @@ per model cycle:
 - **Top row** groups columns by drug name. Shared columns (Cycle, Start Day,
   End Day) and the Combined Total column are standalone.
 - **Bottom row** shows the column type within each drug group: Drug Cost, Admin
-  Cost, Total Cost.
+  Cost, Dispensing Cost, Total Cost.
 - **Combined Total** column = sum of all per-drug Total Cost columns.
 
 ```{r combo-cycle}
@@ -123,16 +127,17 @@ Drug D:
 as_flextable(diagnose_dosing(drug_day1_8))
 ```
 
-## 2. Sharing Administration Costs
+## 2. Sharing Fees
 
 When multiple IV drugs are administered on the same day during a single clinic
 visit, they may share infusion chair time. The `shared_admin` parameter
-controls this. Without sharing (the default), each drug's `admin_cost` is
-charged independently on every administration day.
+controls this. Without sharing (the default), each drug's fees are charged
+independently.
 
-With `shared_admin = TRUE`, drugs share a single administration cost on
-overlapping days. The highest cost in the group is kept; the rest are zeroed
-out. The daily detail makes the effect visible — on Day 1 both drugs are
+With `shared_admin = TRUE`, drugs in the group share fees charged on the same
+day. The highest fee in the group is kept; the rest are zeroed out. This applies
+separately to `admin_cost` (per administration) and `dispensing_cost` (per
+medication cycle). The daily detail makes the effect visible — on Day 1 both drugs are
 administered, so only Drug C's higher admin cost (\$241) is charged. On Day 8,
 only Drug D is administered, so sharing has no effect:
 
@@ -148,8 +153,8 @@ shared_daily <- calculate_med_costs(
 as_flextable(shared_daily)
 ```
 
-The `Admin (Pre-Share)` columns show the original admin costs before sharing
-adjustment. At the cycle level, the savings accumulate:
+The `Admin (Pre-Share)` and `Dispensing (Pre-Share)` columns show each drug's
+fees before sharing. At the cycle level, the savings accumulate:
 
 ```{r shared-admin-cycle}
 shared_costs <- calculate_med_costs(
@@ -167,7 +172,7 @@ wins (first by input order on ties) and Drug D's admin is zeroed. On Day 8,
 only Drug D is present so its \$241 is charged normally. Per cycle: \$241 saved
 vs. no sharing.
 
-You can also use explicit groups when only some drugs share admin costs:
+You can also use explicit groups when only some drugs share fees:
 
 ```r
 calculate_med_costs(
@@ -195,9 +200,11 @@ iv_drug <- define_regimen(
   med_cycle_length = 21,
   admin_days = c(1),
   max_med_cycles = 8,
-  vial_sizes = c(50, 100, 200),
-  vial_cost = c(12.32, 24.64, 49.28),
-  wastage_threshold = 0.1,
+  unit_size = c(50, 100, 200),
+  unit_cost = c(12.32, 24.64, 49.28),
+  exact = FALSE,
+  max_dose_rounding = 0.1,
+  charge_timing = "per_admin",
   admin_cost = 241
 )
 
@@ -210,9 +217,11 @@ oral_drug <- define_regimen(
   med_cycle_length = 21,
   admin_days = 1:14,
   max_med_cycles = 8,
-  available_strengths = c(150, 500),
+  unit_size = c(150, 500),
   unit_cost = 2.21,
-  admin_cost = 0
+  exact = TRUE,
+  charge_timing = "per_dispensing",
+  dispensing_cost = 45
 )
 
 combo_mixed <- calculate_med_costs(
@@ -224,9 +233,16 @@ combo_mixed <- calculate_med_costs(
 as_flextable(combo_mixed)
 ```
 
+The oral drug is whole tablets with a fixed BSA, so it uses `exact = TRUE`
+(3,600 mg = 6 x 500 mg + 4 x 150 mg). It can't also take `patient_bsa_sd`:
+exact dosing needs a fixed dose. Its \$45 pharmacy fee is a `dispensing_cost`,
+charged once per medication cycle; the IV drug's \$241 infusion fee is an
+`admin_cost`, charged per administration.
+
 **Verify:** The combination cost sums both components. IV Drug E mean dose =
 130 x 1.8 = 234 mg (distribution-averaged). Oral Drug F daily dose = 2,000 x
-1.8 = 3,600 mg on each treatment day, with 14 treatment days per cycle.
+1.8 = 3,600 mg = 10 tablets x \$2.21 = \$22.10 a day; 14 days are dispensed on
+day 1 of each cycle, \$309.40, plus the \$45 dispensing fee.
 
 Dosing diagnostic for the IV component:
 
@@ -234,9 +250,11 @@ Dosing diagnostic for the IV component:
 as_flextable(diagnose_dosing(iv_drug))
 ```
 
-The daily detail view shows both drugs side by side. IV drugs get vial-specific
-columns (mg Vials, mg Waste, Vials); oral drugs get tablet/dispensing columns
-(Disp?, Tabs, etc.):
+The daily detail view shows both drugs side by side. The oral drug has a fixed
+dose, so its mg given, units and mg dispensed are shown; its units and drug cost
+appear on day 1 of each cycle, because it is costed `"per_dispensing"`. The IV
+drug's cost is averaged over a BSA distribution, so it shows doses and costs
+only (see its `diagnose_dosing()` table above):
 
 ```{r combo-mixed-daily}
 combo_mixed_daily <- calculate_med_costs(
@@ -275,9 +293,11 @@ loading <- define_regimen(
   admin_days = 1,
   max_med_cycles = 1,
   start_day = 0,
-  vial_sizes = c(150, 420),
-  vial_cost = c(407.40, 1184),
-  wastage_threshold = 0.1
+  unit_size = c(150, 420),
+  unit_cost = c(407.40, 1184),
+  exact = FALSE,
+  max_dose_rounding = 0.1,
+  charge_timing = "per_admin"
 )
 
 maintenance <- define_regimen(
@@ -291,9 +311,11 @@ maintenance <- define_regimen(
   admin_days = 1,
   max_med_cycles = Inf,
   start_day = 21,
-  vial_sizes = c(150, 420),
-  vial_cost = c(407.40, 1184),
-  wastage_threshold = 0.1
+  unit_size = c(150, 420),
+  unit_cost = c(407.40, 1184),
+  exact = FALSE,
+  max_dose_rounding = 0.1,
+  charge_timing = "per_admin"
 )
 
 loading_costs <- calculate_med_costs(
@@ -309,7 +331,7 @@ as_flextable(loading_costs)
 Maintenance dose = 6 x 70 = 420 mg runs from cycle 2 onward. Both phases use
 distribution-averaged costs with `patient_weight_sd = 12`.
 
-Dosing diagnostics confirm different vial selections for the loading phase:
+Dosing diagnostics show the vial combinations for the loading phase:
 
 ```{r loading-dosing-load}
 as_flextable(diagnose_dosing(loading))
@@ -328,7 +350,9 @@ sequential `start_day` values. The formula for the next start day:
 `next_start_day = current_start_day + max_med_cycles * med_cycle_length`.
 
 Here a drug ramps through 20/50/100/200 mg/day over 4 weeks before reaching
-400 mg/day maintenance (a venetoclax-like schedule):
+400 mg/day maintenance (a venetoclax-like schedule; illustrative price of
+\$42.76 per tablet). Tablets are whole, so each phase uses `exact = TRUE`, and
+each phase's supply is costed when it is dispensed:
 
 ```{r escalation}
 strengths <- c(10, 50, 100)
@@ -338,35 +362,40 @@ wk1 <- define_regimen(
   name = "Escalation Wk1", route = "oral",
   dose_per_admin = 20, med_cycle_length = 7,
   admin_days = 1:7, max_med_cycles = 1, start_day = 0,
-  available_strengths = strengths, unit_cost = cost_tab
+  unit_size = strengths, unit_cost = cost_tab,
+  exact = TRUE, charge_timing = "per_dispensing"
 )
 
 wk2 <- define_regimen(
   name = "Escalation Wk2", route = "oral",
   dose_per_admin = 50, med_cycle_length = 7,
   admin_days = 1:7, max_med_cycles = 1, start_day = 7,
-  available_strengths = strengths, unit_cost = cost_tab
+  unit_size = strengths, unit_cost = cost_tab,
+  exact = TRUE, charge_timing = "per_dispensing"
 )
 
 wk3 <- define_regimen(
   name = "Escalation Wk3", route = "oral",
   dose_per_admin = 100, med_cycle_length = 7,
   admin_days = 1:7, max_med_cycles = 1, start_day = 14,
-  available_strengths = strengths, unit_cost = cost_tab
+  unit_size = strengths, unit_cost = cost_tab,
+  exact = TRUE, charge_timing = "per_dispensing"
 )
 
 wk4 <- define_regimen(
   name = "Escalation Wk4", route = "oral",
   dose_per_admin = 200, med_cycle_length = 7,
   admin_days = 1:7, max_med_cycles = 1, start_day = 21,
-  available_strengths = strengths, unit_cost = cost_tab
+  unit_size = strengths, unit_cost = cost_tab,
+  exact = TRUE, charge_timing = "per_dispensing"
 )
 
 maint <- define_regimen(
   name = "Maintenance", route = "oral",
   dose_per_admin = 400, med_cycle_length = 28,
   admin_days = 1:28, max_med_cycles = Inf, start_day = 28,
-  available_strengths = strengths, unit_cost = cost_tab
+  unit_size = strengths, unit_cost = cost_tab,
+  exact = TRUE, charge_timing = "per_dispensing"
 )
 
 esc_costs <- calculate_med_costs(
@@ -378,6 +407,7 @@ esc_costs <- calculate_med_costs(
 as_flextable(esc_costs)
 ```
 
-**Verify:** Weeks 1--4 each show escalating costs reflecting 20, 50, 100, and
-200 mg daily doses. From week 5 onward, the maintenance phase (400 mg = 4 x
-100 mg tablets) dominates.
+**Verify:** Weeks 1--4 cost 7 days of 2 x 10 mg (\$598.64), 1 x 50 mg
+(\$299.32), 1 x 100 mg (\$299.32) and 2 x 100 mg (\$598.64). Maintenance is
+4 x 100 mg = \$171.04 a day; each 28-day supply (\$4,789.12) is dispensed in
+weeks 5, 9, 13 and so on, and the weeks between show \$0.

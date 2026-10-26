@@ -17,24 +17,22 @@ define_regimen(
   admin_days,
   max_med_cycles = Inf,
   start_day = 0,
+  unit_size = NULL,
   unit_cost = NULL,
-  units_per_pack = 1,
-  tablet_strength = NULL,
-  available_strengths = NULL,
-  oral_wastage = NULL,
-  vial_size = NULL,
-  vial_sizes = NULL,
-  vial_cost = NULL,
-  wastage_threshold = 0,
+  exact,
+  max_dose_rounding = 0,
+  no_wastage = FALSE,
+  charge_timing,
   admin_cost = 0,
-  cost_per_day = NULL
+  dispensing_cost = 0
 )
 }
 \arguments{
 \item{name}{Character. Drug name (for labelling).}
 
 \item{route}{"iv", "oral", "sc" (subcutaneous), or "im"
-(intramuscular).}
+(intramuscular). A label only; it does not affect
+costing.}
 
 \item{dose_per_admin}{Numeric. Dose per administration in mg (flat dose)
 or mg/kg or mg/m² depending on \code{dose_basis}.}
@@ -48,78 +46,68 @@ or mg/kg or mg/m² depending on \code{dose_basis}.}
 = "bsa").}
 
 \item{patient_weight_sd}{Numeric or NULL. Standard deviation of patient
-weight (kg). If provided with dose_basis = "weight",
-enables distribution-averaged cost calculation.}
+weight (kg). With dose_basis = "weight", costs are
+averaged over a lognormal weight distribution.}
 
 \item{patient_bsa_sd}{Numeric or NULL. Standard deviation of patient BSA
-(m²). If provided with dose_basis = "bsa", enables
-distribution-averaged cost calculation.}
+(m²). With dose_basis = "bsa", costs are averaged
+over a lognormal BSA distribution.}
 
 \item{med_cycle_length}{Numeric. Length of one \emph{medication} cycle in days.
 This may differ from the model cycle length.}
 
-\item{admin_days}{Integer vector. Explicit days within the medication
-cycle on which administration occurs (1-indexed).
-This argument is required.}
+\item{admin_days}{Integer vector. Days within the medication cycle on
+which administration occurs (1-indexed, no
+duplicates). Day d is given d - 1 days after the
+cycle starts, which must be within the cycle.}
 
-\item{max_med_cycles}{Numeric or Inf. Maximum number of medication cycles
-(i.e. treatment duration cap). Inf = no cap.}
+\item{max_med_cycles}{Numeric or Inf. Maximum number of medication cycles.}
 
 \item{start_day}{Numeric. Day on which this regimen's treatment
-begins (default 0). Shifts all treatment events by
-this offset on the shared model timeline. Useful for
-chaining regimen objects (e.g. loading + maintenance).}
+begins (default 0).}
 
-\item{unit_cost}{Numeric. Cost per tablet (oral) or per vial (IV).}
+\item{unit_size}{Numeric vector. Sizes of the units the drug is
+dispensed in (mg per vial, tablet, pen, ...).}
 
-\item{units_per_pack}{Numeric. Tablets per pack or vials per pack (for
-costing; default 1, meaning unit_cost is per single
-unit).}
+\item{unit_cost}{Numeric. Cost per unit: one value for every size,
+or one value per \code{unit_size}, in the same
+order.}
 
-\item{tablet_strength}{Numeric. mg per tablet (oral only).}
+\item{exact}{Logical, required. \code{TRUE}: the units must make
+up the dose exactly (whole units, nothing left
+over); a dose that can't be reached is an error at
+runtime. \code{FALSE}: the cheapest units covering
+the dose are dispensed and the remainder is paid
+for.}
 
-\item{available_strengths}{Numeric vector. Available tablet strengths in mg
-(oral). If supplied, the function picks the optimal
-combination to minimise tablet rounding waste.
-If NULL, uses \code{tablet_strength}.}
+\item{max_dose_rounding}{Numeric in [0, 1). The largest share of the
+prescribed dose that may be rounded away. When the
+cheapest units covering the dose leave drug over,
+the dose is rounded down to the nearest amount the
+units make up exactly, if that is cheaper. Only
+with \code{exact = FALSE}; with \code{exact = TRUE}
+it must be 0.}
 
-\item{oral_wastage}{Logical. If TRUE (default for oral), the full
-medication cycle's tablets are dispensed at the
-start of each medication cycle. Cost is charged
-to the model cycle containing that dispensing day,
-regardless of whether all tablets are consumed.
-This is the standard approach in CEA models.
-If FALSE, cost is attributed per-administration
-(same as IV logic).}
+\item{no_wastage}{Logical. \code{TRUE} costs the prescribed dose at
+the lowest cost per mg among the unit sizes (the
+no-wastage scenario). Rounding does not apply.}
 
-\item{vial_size}{Numeric. mg per vial (IV only).}
+\item{charge_timing}{Required. \code{"per_admin"}: each dose is costed on
+its administration day. \code{"per_dispensing"}: a
+whole medication cycle's doses are costed on day 1
+of that cycle.}
 
-\item{vial_sizes}{Numeric vector. Available vial sizes in mg (IV).
-If supplied, optimal vial combination is selected.
-If NULL, uses \code{vial_size}.}
+\item{admin_cost}{Numeric. Fee charged on each administration (for
+example an infusion or injection).}
 
-\item{vial_cost}{Numeric or named numeric vector. Cost per vial. If
-\code{vial_sizes} is a vector, this should be a
-vector of corresponding costs.}
-
-\item{wastage_threshold}{Numeric 0-1 (IV only). If the residual dose in the
-last vial is <= this fraction of the vial size, do
-NOT open that vial (dose-band down). E.g. 0.1 means
-skip the last vial if you would use ≤10\% of it.
-Set to 0 to always round up (open every vial needed).}
-
-\item{admin_cost}{Numeric. Administration / dispensing cost per
-administration event (IV) or per dispensing event
-(oral with wastage).}
-
-\item{cost_per_day}{Numeric or NULL. If supplied, enables the simple
-"cost per unit time" mode — all other dosing detail
-is ignored and the cost is simply
-cost_per_day × days in cycle.}
+\item{dispensing_cost}{Numeric. Fee charged once per medication cycle (the
+pharmacy dispensing fee).}
 }
 \value{
 A list of class "med_regimen".
 }
 \description{
-Create a medication regimen specification
+A regimen describes a dose, a schedule, the units the drug is dispensed in,
+and how it is costed. Costing is the same for every product: the route is a
+label only.
 }

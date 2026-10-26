@@ -56,7 +56,7 @@ export.med_regimen_combo <- function(x) {
     error = function(e) NULL
   )
   res$regimens <- tryCatch(
-    lapply(x$regimens, export),
+    lapply(x$regimens, export.med_regimen),
     error = function(e) NULL
   )
   res

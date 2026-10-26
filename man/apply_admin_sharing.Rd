@@ -2,24 +2,28 @@
 % Please edit documentation in R/calculate_med_costs.R
 \name{apply_admin_sharing}
 \alias{apply_admin_sharing}
-\title{Apply administration cost sharing within groups}
+\title{Apply fee sharing within groups}
 \usage{
-apply_admin_sharing(daily, sharing_groups, drug_names)
+apply_admin_sharing(daily, sharing_groups, drug_names, prefix)
 }
 \arguments{
 \item{daily}{Wide-format daily data frame.}
 
-\item{sharing_groups}{List of character vectors (drug names).}
+\item{sharing_groups}{List of character vectors (drug names), each in
+input order.}
 
 \item{drug_names}{Character vector of all drug names (in input order).}
+
+\item{prefix}{Named character vector: column prefix for each drug name.}
 }
 \value{
-The modified daily data frame with pre_sharing_admin_cost and
-adjusted admin_cost columns.
+The modified daily data frame with pre-sharing fee columns and
+adjusted fee and total columns.
 }
 \description{
-Operates on a wide-format daily data frame. For each sharing group, on days
-where more than one drug has admin_cost > 0, keeps only the highest cost
-(first by input order on ties) and zeros out the rest.
+Operates on a wide-format daily data frame. For each sharing group and each
+fee (\code{admin_cost}, \code{dispensing_cost}), on rows where more than
+one drug has that fee, keeps only the highest (first by input order on
+ties) and zeros out the rest.
 }
 \keyword{internal}

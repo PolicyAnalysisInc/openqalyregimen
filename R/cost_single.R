@@ -1,413 +1,357 @@
-#' Calculate IV drug cost for a single administration
+#' Integer grid scale for a set of unit sizes
 #'
-#' Finds the minimum-cost combination of vials that covers the required dose,
-#' using dynamic programming (optimal covering formulation).
+#' The smallest power of 10 (1 to 1000) that makes every unit size a whole
+#' number. The scale depends on the unit sizes only, never on the dose.
 #'
-#' @param dose_mg         Required dose in mg.
-#' @param vial_sizes      Numeric vector of available vial sizes (mg).
-#' @param vial_costs      Numeric vector of corresponding vial costs.
-#' @param wastage_threshold Fraction 0-1.  If the fraction of the marginal
-#'                          vial used is <= this, skip that vial.
-#' @return List with drug_cost, n_vials (named vector), waste_mg.
+#' @param sizes Numeric vector of unit sizes (mg).
+#' @return Numeric scalar.
 #' @keywords internal
-cost_iv_single <- function(dose_mg, vial_sizes, vial_costs,
-                           wastage_threshold = 0) {
-    result <- optimal_vial_cost_single(dose_mg, vial_sizes, vial_costs,
-                                       wastage_threshold)
-    ord <- order(vial_sizes, decreasing = TRUE)
-    n_vials <- result$n_vials[ord]
-    names(n_vials) <- paste0(vial_sizes[ord], "mg")
-    list(
-        drug_cost = result$drug_cost,
-        n_vials   = n_vials,
-        waste_mg  = result$waste_mg
-    )
+unit_grid_scale <- function(sizes) {
+    for (k in 0:3) {
+        sc <- 10^k
+        v <- sizes * sc
+        if (all(abs(v - round(v)) <= 1e-9 * pmax(1, abs(v)))) return(sc)
+    }
+    stop("unit_size values must have at most 3 decimal places.", call. = FALSE)
 }
 
 
-#' Calculate oral drug cost for a single administration
+#' Build the exact-fill table for a regimen's units
 #'
-#' Handles tablet rounding: dose is rounded up to the nearest achievable
-#' combination of available tablet strengths (whole tablets only). This is
-#' per-administration rounding (you can't split a pill), distinct from oral
-#' wastage (dispensing a full cycle upfront).
-#'
-#' @param dose_mg             Required dose in mg.
-#' @param available_strengths Numeric vector of tablet strengths (mg).
-#' @param cost_per_tablet     Numeric. Cost per tablet (assumed same across
-#'                            strengths unless cost_per_strength is provided).
-#' @param cost_per_strength   Named numeric vector. Cost per tablet for each
-#'                            strength. Names should match available_strengths.
-#' @return List with drug_cost, tablets (named vector), waste_mg.
+#' @param sizes Numeric vector of unit sizes (mg).
+#' @param costs Numeric vector of unit costs (same length as sizes).
+#' @param max_dose Largest dose (mg) the table must support.
+#' @return A list: sizes, costs, scale, int_sizes, cost, units, parent, max_int.
 #' @keywords internal
-cost_oral_single <- function(dose_mg, available_strengths,
-                             cost_per_tablet    = NULL,
-                             cost_per_strength  = NULL) {
-    # Sort descending
-    ord      <- order(available_strengths, decreasing = TRUE)
-    strengths <- available_strengths[ord]
+unit_table <- function(sizes, costs, max_dose) {
+    sc <- unit_grid_scale(sizes)
+    int_sizes <- as.integer(round(sizes * sc))
+    max_cells <- ceiling(max(max_dose, 0) * sc - 1e-9) + max(int_sizes) + 1
+    if (!is.finite(max_cells) || max_cells > 5e7) {
+        stop("Dose is too large relative to the smallest unit_size step ",
+             "(table would need more than 50 million cells).", call. = FALSE)
+    }
+    max_int <- as.integer(max_cells)
+    tab <- exact_fill_table(int_sizes, as.numeric(costs), max_int)
+    c(list(sizes = sizes, costs = as.numeric(costs), scale = sc,
+           int_sizes = int_sizes, max_int = max_int), tab)
+}
 
-    if (!is.null(cost_per_strength)) {
-        tab_costs <- cost_per_strength[ord]
+
+# Count units of each size in the combination for grid amount x.
+unit_counts <- function(tab, x) {
+    n <- integer(length(tab$sizes))
+    while (x > 0) {
+        k <- tab$parent[x + 1L] + 1L
+        n[k] <- n[k] + 1L
+        x <- x - tab$int_sizes[k]
+    }
+    ord <- order(tab$sizes, decreasing = TRUE)
+    n <- n[ord]
+    names(n) <- paste0(format_mg(tab$sizes[ord]), "mg")
+    n
+}
+
+format_mg <- function(x) format(x, trim = TRUE, drop0trailing = TRUE,
+                                 scientific = FALSE)
+
+# Is grid amount x reachable?
+reachable <- function(tab, x) {
+    x >= 0 && x <= tab$max_int && is.finite(tab$cost[x + 1L])
+}
+
+# Grid position of a dose: the amount it sits on (within a relative 1e-9),
+# else the smallest grid amount above it. on = whether it sits on one.
+dose_grid <- function(dose, sc) {
+    v <- dose * sc
+    x0 <- round(v)
+    on <- abs(v - x0) <= 1e-9 * pmax(1, v)
+    list(lo = as.integer(ifelse(on, x0, ceiling(v))), on = on)
+}
+
+# Nearest reachable grid amount strictly below grid position lo (> 0), or NA.
+nearest_reachable_below <- function(tab, lo) {
+    x <- lo - 1L
+    while (x >= 1L) {
+        if (is.finite(tab$cost[x + 1L])) return(x)
+        x <- x - 1L
+    }
+    NA_integer_
+}
+
+# Nearest reachable grid amount at or above grid position lo, or NA.
+nearest_reachable_above <- function(tab, lo) {
+    x <- lo
+    while (x <= tab$max_int) {
+        if (is.finite(tab$cost[x + 1L])) return(x)
+        x <- x + 1L
+    }
+    NA_integer_
+}
+
+
+#' Cost and units for a single dose
+#'
+#' Applies the costing rules to one dose:
+#' \itemize{
+#'   \item \code{exact = FALSE}: the cheapest units that cover the dose
+#'     (ties: least drug, then fewest units); the remainder is discarded and
+#'     paid for. If \code{max_dose_rounding > 0} and the units hold more than
+#'     the dose, the dose is rounded down to the nearest amount the units fill
+#'     exactly, when the shortfall is at most \code{max_dose_rounding} times the
+#'     prescribed dose and that amount is strictly cheaper.
+#'   \item \code{exact = TRUE}: the units must make up the prescribed dose
+#'     exactly. If they can't, an error is raised. Rounding never applies.
+#'   \item \code{no_wastage = TRUE}: the cost is the prescribed dose times the
+#'     lowest cost per mg among the unit sizes. Rounding does not apply.
+#' }
+#'
+#' @param dose Prescribed dose (mg).
+#' @param tab Table from \code{unit_table()}.
+#' @param exact Logical.
+#' @param max_dose_rounding Numeric in [0, 1).
+#' @param no_wastage Logical.
+#' @return A list: cost, units (named counts), prescribed_mg, given_mg,
+#'   shortfall_mg, dispensed_mg, leftover_mg.
+#' @keywords internal
+cost_dose_detail <- function(dose, tab, exact, max_dose_rounding = 0,
+                             no_wastage = FALSE) {
+    if (!is.finite(dose) || dose < 0) {
+        stop("Dose must be a finite, non-negative number of mg.", call. = FALSE)
+    }
+    sc <- tab$scale
+    out <- list(prescribed_mg = dose)
+    if (dose == 0) {
+        return(c(out, list(cost = 0, units = unit_counts(tab, 0L), given_mg = 0,
+                           shortfall_mg = 0, dispensed_mg = 0, leftover_mg = 0)))
+    }
+    t <- if (no_wastage) 0 else max_dose_rounding
+    g <- dose_grid(dose, sc)
+    lo <- g$lo                 # grid amount the dose sits on, or just above it
+    on_grid <- g$on
+    # A dose within tolerance of an amount is treated as that amount
+    dose_eff <- if (on_grid) lo / sc else dose
+
+    within <- function(x) (dose - x / sc) <= t * dose + 1e-9 * max(1, dose)
+
+    if (exact) {
+        if (on_grid && reachable(tab, lo)) {
+            x <- lo
+        } else {
+            xb <- nearest_reachable_below(tab, lo)
+            xa <- nearest_reachable_above(tab, lo + as.integer(on_grid))
+            near <- c(if (!is.na(xb)) xb / sc, if (!is.na(xa)) xa / sc)
+            stop("The dose of ", format_mg(dose), " mg cannot be made ",
+                 "exactly from unit sizes ",
+                 paste0(format_mg(tab$sizes), collapse = ", "), " mg",
+                 ". Nearest reachable amounts: ",
+                 paste0(format_mg(near), " mg", collapse = " and "), ".",
+                 call. = FALSE)
+        }
+        given <- x / sc
+        dispensed <- x / sc
     } else {
-        tab_costs <- rep(cost_per_tablet, length(strengths))
-    }
-
-    remaining <- dose_mg
-    n_tabs    <- integer(length(strengths))
-    total_cost <- 0
-
-    for (i in seq_along(strengths)) {
-        if (remaining <= 0) break
-        n <- floor(remaining / strengths[i])
-        n_tabs[i]  <- n
-        remaining  <- remaining - n * strengths[i]
-        total_cost <- total_cost + n * tab_costs[i]
-    }
-
-    # Tablet rounding: if any residual, round up with smallest tablet
-    if (remaining > 1e-9) {
-        smallest_idx <- length(strengths)
-        n_tabs[smallest_idx] <- n_tabs[smallest_idx] + 1L
-        total_cost <- total_cost + tab_costs[smallest_idx]
-        remaining  <- strengths[smallest_idx] - remaining
-    }
-
-    waste_mg <- max(remaining, 0)
-    names(n_tabs) <- paste0(strengths, "mg")
-
-    list(drug_cost = total_cost, tablets = n_tabs, waste_mg = waste_mg)
-}
-
-
-#' Find all achievable exact-fill amounts (coin-change reachability)
-#'
-#' Given a set of vial sizes (or tablet strengths), returns all non-negative
-#' integer amounts that can be expressed as a sum of non-negative integer
-#' multiples of those sizes, up to \code{max_amount}.
-#'
-#' @param sizes Numeric vector of vial sizes or tablet strengths.
-#' @param max_amount Numeric scalar. Upper bound on amounts to consider.
-#' @return Integer vector of all achievable amounts (including 0), sorted.
-#' @keywords internal
-vial_breakpoints <- function(sizes, max_amount) {
-    max_int <- ceiling(max_amount)
-    reachable <- logical(max_int + 1L)
-    reachable[1L] <- TRUE # 0 is reachable
-    for (s in sizes) {
-        s_int <- max(1L, as.integer(round(s)))
-        if (s_int > max_int) next
-        for (j in seq.int(s_int, max_int)) {
-            if (reachable[j - s_int + 1L]) {
-                reachable[j + 1L] <- TRUE
+        smax <- max(tab$int_sizes)
+        cand <- lo:(lo + smax - 1L)
+        cand <- cand[cand <= tab$max_int]
+        cand <- cand[is.finite(tab$cost[cand + 1L])]
+        if (length(cand) == 0L) stop("No combination of units covers the dose.",
+                                     call. = FALSE)
+        cc <- tab$cost[cand + 1L]
+        o <- order(signif(cc, 12), cand, tab$units[cand + 1L])
+        x <- cand[o[1]]
+        given <- dose_eff
+        dispensed <- x / sc
+        if (t > 0 && dispensed > dose_eff + 1e-9 * max(1, dose)) {
+            xb <- nearest_reachable_below(tab, lo)
+            if (!is.na(xb) && within(xb) &&
+                tab$cost[xb + 1L] < tab$cost[x + 1L] -
+                    1e-9 * max(1, tab$cost[x + 1L])) {
+                x <- xb
+                given <- xb / sc
+                dispensed <- xb / sc
             }
         }
     }
-    which(reachable) - 1L
+
+    cost <- tab$cost[x + 1L]
+    units <- unit_counts(tab, x)
+    if (no_wastage) {
+        cost <- dose * min(tab$costs / tab$sizes)
+        given <- dose
+        dose_eff <- dose
+    }
+    c(out, list(
+        cost = cost,
+        units = units,
+        given_mg = given,
+        shortfall_mg = max(dose_eff - given, 0),
+        dispensed_mg = dispensed,
+        leftover_mg = max(dispensed - given, 0)
+    ))
 }
 
 
-#' Generate cost-based bins from a lognormal distribution of patient values
-#'
-#' Identifies natural breakpoints where the cost function changes (vial/tablet
-#' boundaries), then computes lognormal probabilities for each cost interval.
-#' Users supply natural-scale mean+SD; conversion to lognormal parameters is
-#' handled internally.
-#'
-#' @param reg      A med_regimen object.
-#' @param mean_val Numeric. Mean of the patient parameter (weight or BSA).
-#' @param sd_val   Numeric. Standard deviation.
-#' @param include_packing Logical. If TRUE, compute per-bin packing detail
-#'   via \code{cost_iv_single()} instead of \code{cost_single_dose_vec()}.
-#'   Only supported for vial-based routes.
-#' @return Data frame with columns: bin, dose_lo, dose_hi, cost, probability.
-#'   When \code{include_packing = TRUE}, additional columns are returned
-#'   (param_lo, param_hi, midpoint, n_vials, waste_mg, mg_administered,
-#'   weighted_cost) and attributes \code{"packing_results"},
-#'   \code{"expected_cost"}, \code{"dose_per_admin"}.
-#' @importFrom stats plnorm
+#' Unit sizes and costs of a regimen, with costs recycled to sizes
+#' @param reg A med_regimen object.
+#' @return list(sizes, costs)
 #' @keywords internal
-generate_cost_bins <- function(reg, mean_val, sd_val,
-                               include_packing = FALSE) {
-    dose_per_admin <- reg$dose_per_admin
+regimen_units <- function(reg) {
+    costs <- reg$unit_cost
+    if (length(costs) == 1L) costs <- rep(costs, length(reg$unit_size))
+    list(sizes = reg$unit_size, costs = as.numeric(costs))
+}
 
-    if (include_packing && !(reg$route %in% VIAL_ROUTES)) {
-        stop("include_packing only supported for vial-based routes.")
+
+#' Cost detail of one dose for a regimen
+#'
+#' @param dose_mg Dose in mg.
+#' @param reg A med_regimen object.
+#' @param tab Optional pre-built table.
+#' @return See \code{cost_dose_detail()}.
+#' @keywords internal
+cost_single_dose <- function(dose_mg, reg, tab = NULL) {
+    if (is.null(tab)) {
+        u <- regimen_units(reg)
+        tab <- unit_table(u$sizes, u$costs, dose_mg)
     }
+    cost_dose_detail(dose_mg, tab, reg$exact, reg$max_dose_rounding,
+                     reg$no_wastage)
+}
 
-    # Convert natural-scale mean+SD to lognormal parameters
+
+#' Patient distribution parameters for a regimen, or NULL
+#' @param reg A med_regimen object.
+#' @return list(mean, sd) or NULL.
+#' @keywords internal
+regimen_distribution <- function(reg) {
+    if (reg$dose_basis == "weight" && !is.null(reg$patient_weight_sd)) {
+        return(list(mean = reg$patient_weight, sd = reg$patient_weight_sd))
+    }
+    if (reg$dose_basis == "bsa" && !is.null(reg$patient_bsa_sd)) {
+        return(list(mean = reg$patient_bsa, sd = reg$patient_bsa_sd))
+    }
+    NULL
+}
+
+
+#' Generate cost bins over a lognormal distribution of patient values
+#'
+#' The cost of a dose only changes where the dose crosses an amount the units
+#' fill exactly, or (with rounding) where the shortfall to the nearest such
+#' amount reaches \code{max_dose_rounding} times the dose (dose = amount /
+#' (1 - max_dose_rounding)). Between these breakpoints the cost is constant,
+#' so each bin is costed at its midpoint and weighted by its lognormal
+#' probability.
+#'
+#' @param reg A med_regimen object (not exact, not no_wastage).
+#' @param mean_val Mean of the patient parameter (natural scale).
+#' @param sd_val Standard deviation of the patient parameter.
+#' @param details Logical. If TRUE, attach the per-bin unit detail (from
+#'   \code{cost_dose_detail()}) as attribute \code{"details"}.
+#' @return A data.frame with one row per bin: bin, param_lo, param_hi,
+#'   dose_lo, dose_hi, cost, probability; with \code{details = TRUE}, the
+#'   per-bin unit detail in attribute \code{"details"}.
+#' @importFrom stats plnorm qlnorm
+#' @keywords internal
+generate_cost_bins <- function(reg, mean_val, sd_val, details = FALSE) {
+    dpa <- reg$dose_per_admin
     sigma2 <- log(1 + (sd_val / mean_val)^2)
     mu <- log(mean_val) - sigma2 / 2
     sigma <- sqrt(sigma2)
 
-    # Dose range: ±5SD bounds
-    dose_min <- dose_per_admin * max(0, mean_val - 5 * sd_val)
-    dose_max <- dose_per_admin * (mean_val + 5 * sd_val)
+    dose_min <- dpa * stats::qlnorm(1e-9, mu, sqrt(sigma2))
+    dose_max <- dpa * stats::qlnorm(1 - 1e-9, mu, sqrt(sigma2))
 
-    # 1. Candidate breakpoints: all achievable exact-fill amounts
-    if (reg$route %in% VIAL_ROUTES) {
-        achievable <- vial_breakpoints(reg$vial_sizes, dose_max)
-        if (reg$wastage_threshold > 0) {
-            offsets <- unlist(lapply(reg$vial_sizes, function(s) {
-                achievable + s * reg$wastage_threshold
-            }))
-            candidates <- sort(unique(c(achievable, offsets)))
-        } else {
-            candidates <- achievable
-        }
-    } else {
-        candidates <- vial_breakpoints(reg$available_strengths, dose_max)
+    u <- regimen_units(reg)
+    tab <- unit_table(u$sizes, u$costs, dose_max)
+    reach <- (which(is.finite(tab$cost)) - 1L) / tab$scale
+    reach <- reach[reach > 0]
+    t <- reg$max_dose_rounding
+    cand <- reach
+    if (t > 0) cand <- c(cand, reach / (1 - t))
+    cand <- sort(unique(round(cand, 9)))
+    cand <- cand[cand > dose_min & cand < dose_max]
+    edges <- c(dose_min, cand, dose_max)
+    mids <- (edges[-1] + edges[-length(edges)]) / 2
+
+    # Cost every midpoint at once (exact = FALSE; exact can't be combined
+    # with a distribution). Same rules as cost_dose_detail().
+    sc <- tab$scale
+    g <- dose_grid(mids, sc)
+    best <- tab$best
+    if (is.null(best)) best <- cover_best(tab$cost)
+    x <- best[g$lo + 1L]
+    if (anyNA(x) || any(x < 0L)) {
+        stop("No combination of units covers the dose.", call. = FALSE)
     }
-    all_candidates <- candidates
-    candidates <- all_candidates[all_candidates >= dose_min &
-                                     all_candidates <= dose_max]
-    # Ensure at least one candidate (narrow distributions may exclude all)
-    if (length(candidates) == 0) {
-        below <- all_candidates[all_candidates <= dose_max]
-        candidates <- if (length(below) > 0) max(below) else 0
+    dose_eff <- ifelse(g$on, g$lo / sc, mids)
+    rounded <- logical(length(mids))
+    if (t > 0) {
+        reach_idx <- which(is.finite(tab$cost)) - 1L
+        j <- findInterval(g$lo - 1L, reach_idx)
+        xb <- ifelse(j >= 1L, reach_idx[pmax(j, 1L)], 0L)
+        cx <- tab$cost[x + 1L]
+        cb <- tab$cost[xb + 1L]
+        rounded <- x / sc > dose_eff + 1e-9 * pmax(1, mids) &
+            xb > 0L &
+            (mids - xb / sc) <= t * mids + 1e-9 * pmax(1, mids) &
+            cb < cx - 1e-9 * pmax(1, cx)
+        x[rounded] <- xb[rounded]
     }
+    costs <- tab$cost[x + 1L]
 
-    # 2. Interval bounds and costs
-    n <- length(candidates)
-    dose_lo <- candidates
-    dose_hi <- c(candidates[-1], Inf)
-    smallest <- if (reg$route %in% VIAL_ROUTES)
-        min(reg$vial_sizes) else min(reg$available_strengths)
-    midpoints <- c(
-        (candidates[-n] + candidates[-1]) / 2,
-        candidates[n] + smallest / 2
-    )
-
-    if (include_packing) {
-        # Per-bin packing via cost_iv_single (pre-merge)
-        pre_packing <- lapply(midpoints, function(dose) {
-            cost_iv_single(
-                dose_mg           = dose,
-                vial_sizes        = reg$vial_sizes,
-                vial_costs        = reg$vial_cost,
-                wastage_threshold = reg$wastage_threshold
-            )
-        })
-        costs <- vapply(pre_packing, function(p) p$drug_cost, numeric(1))
-    } else {
-        costs <- cost_single_dose_vec(midpoints, reg)
-    }
-
-    # 3. Merge consecutive same-cost intervals (rle)
-    runs <- rle(costs)
+    # Merge consecutive bins with the same cost, units and rounding (the
+    # units are determined by the grid amount x)
+    keys <- paste(signif(costs, 12), x, rounded)
+    runs <- rle(keys)
     end_idx <- cumsum(runs$lengths)
     start_idx <- c(1L, end_idx[-length(end_idx)] + 1L)
-    merged_lo <- dose_lo[start_idx]
-    merged_cost <- runs$values
-    merged_hi <- c(merged_lo[-1], Inf)
+    lo <- edges[start_idx]
+    hi <- edges[end_idx + 1L]
+    p_lo <- lo / dpa
+    p_hi <- hi / dpa
+    p_lo[1] <- 0
+    p_hi[length(p_hi)] <- Inf
+    probs <- stats::plnorm(p_hi, mu, sigma) - stats::plnorm(p_lo, mu, sigma)
 
-    # 4. Probabilities (lognormal CDF on patient-value scale)
-    patient_lo <- merged_lo / dose_per_admin
-    patient_hi <- merged_hi / dose_per_admin
-    # First bin: plnorm(hi, mu, sigma) captures all mass from 0
-    # (lognormal is naturally bounded at 0, no negative values)
-    patient_lo[1] <- 0
-    probs <- plnorm(patient_hi, mu, sigma) -
-        plnorm(patient_lo, mu, sigma)
-
-    if (!include_packing) {
-        return(data.frame(
-            bin = seq_along(merged_lo), dose_lo = merged_lo,
-            dose_hi = merged_hi, cost = merged_cost,
-            probability = probs
-        ))
-    }
-
-    # include_packing = TRUE: build enriched result
-    # Use start_idx to pick the representative packing per merged bin
-    merged_packing <- pre_packing[start_idx]
-    merged_midpoints <- pmin(midpoints[start_idx], dose_max)
-
-    n_vials_vec <- as.integer(vapply(merged_packing,
-        function(p) sum(p$n_vials), numeric(1)))
-    total_content_vec <- vapply(merged_packing, function(p) {
-        sizes <- as.numeric(sub("mg$", "", names(p$n_vials)))
-        sum(sizes * p$n_vials)
-    }, numeric(1))
-    weighted_cost <- merged_cost * probs
-
-    # Display bounds: actual candidates, capped at ±5SD
-    out_param_lo <- merged_lo / dose_per_admin
-    out_param_hi <- merged_hi / dose_per_admin
-    out_param_hi[length(out_param_hi)] <- mean_val + 5 * sd_val
-    out_dose_hi <- merged_hi
-    out_dose_hi[length(out_dose_hi)] <- dose_max
-
-    # Range columns: waste and mg_administered vary with dose within each bin
-    waste_mg_lo <- pmax(total_content_vec - out_dose_hi, 0)
-    waste_mg_hi <- total_content_vec - merged_lo
-    mg_administered_lo <- merged_lo
-    mg_administered_hi <- out_dose_hi
-
-    result <- data.frame(
-        bin                = seq_along(merged_lo),
-        param_lo           = out_param_lo,
-        param_hi           = out_param_hi,
-        dose_lo            = merged_lo,
-        dose_hi            = out_dose_hi,
-        n_vials            = n_vials_vec,
-        total_vial_mg      = total_content_vec,
-        mg_administered_lo = mg_administered_lo,
-        mg_administered_hi = mg_administered_hi,
-        waste_mg_lo        = waste_mg_lo,
-        waste_mg_hi        = waste_mg_hi,
-        cost               = merged_cost,
-        probability        = probs,
-        weighted_cost      = weighted_cost,
-        stringsAsFactors   = FALSE
+    out <- data.frame(
+        bin = seq_along(lo),
+        param_lo = lo / dpa,
+        param_hi = hi / dpa,
+        dose_lo = lo,
+        dose_hi = hi,
+        cost = costs[start_idx],
+        probability = probs
     )
-
-    attr(result, "packing_results") <- merged_packing
-    attr(result, "expected_cost")   <- sum(weighted_cost)
-    attr(result, "dose_per_admin")  <- dose_per_admin
-    result
-}
-
-
-#' Cost of a single dose (dispatch by route)
-#'
-#' @param dose_mg Numeric. Dose in mg.
-#' @param reg     A med_regimen object (for route, vial/tablet info).
-#' @return Numeric scalar: drug cost for this dose.
-#' @keywords internal
-cost_single_dose <- function(dose_mg, reg) {
-    if (reg$route %in% VIAL_ROUTES) {
-        res <- cost_iv_single(
-            dose_mg           = dose_mg,
-            vial_sizes        = reg$vial_sizes,
-            vial_costs        = reg$vial_cost,
-            wastage_threshold = reg$wastage_threshold
-        )
-        return(res$drug_cost)
-    } else {
-        if (!is.null(names(reg$unit_cost))) {
-            res <- cost_oral_single(
-                dose_mg             = dose_mg,
-                available_strengths = reg$available_strengths,
-                cost_per_strength   = reg$unit_cost
-            )
-        } else {
-            res <- cost_oral_single(
-                dose_mg             = dose_mg,
-                available_strengths = reg$available_strengths,
-                cost_per_tablet     = reg$unit_cost
-            )
-        }
-        return(res$drug_cost)
+    if (details) {
+        attr(out, "details") <- lapply(mids[start_idx], function(d) {
+            cost_dose_detail(d, tab, reg$exact, t, reg$no_wastage)
+        })
     }
+    out
 }
 
 
-#' Vectorized IV drug cost
+#' Expected drug cost of one administration
 #'
-#' Accepts a vector of doses and returns a vector of costs.
-#' @param dose_mg         Numeric vector of doses in mg.
-#' @param vial_sizes      Numeric vector of available vial sizes (mg).
-#' @param vial_costs      Numeric vector of corresponding vial costs.
-#' @param wastage_threshold Fraction 0-1.
-#' @return Numeric vector of drug costs.
-#' @keywords internal
-cost_iv_vec <- function(dose_mg, vial_sizes, vial_costs,
-                        wastage_threshold = 0) {
-    optimal_vial_cost_vec(dose_mg, vial_sizes, vial_costs,
-                          wastage_threshold)
-}
-
-
-#' Vectorized oral drug cost
-#'
-#' Accepts a vector of doses and returns a vector of costs.
-#' @param dose_mg             Numeric vector of doses in mg.
-#' @param available_strengths Numeric vector of tablet strengths (mg).
-#' @param cost_per_tablet     Numeric scalar or NULL.
-#' @param cost_per_strength   Numeric vector or NULL.
-#' @return Numeric vector of drug costs.
-#' @keywords internal
-cost_oral_vec <- function(dose_mg, available_strengths,
-                          cost_per_tablet = NULL,
-                          cost_per_strength = NULL) {
-    ord <- order(available_strengths, decreasing = TRUE)
-    strengths <- available_strengths[ord]
-    tab_costs <- if (!is.null(cost_per_strength))
-        cost_per_strength[ord]
-    else rep(cost_per_tablet, length(strengths))
-    remaining <- dose_mg
-    total_cost <- numeric(length(dose_mg))
-    for (i in seq_along(strengths)) {
-        n <- pmax(floor(remaining / strengths[i]), 0)
-        total_cost <- total_cost + n * tab_costs[i]
-        remaining <- remaining - n * strengths[i]
-    }
-    needs_rounding <- remaining > 1e-9
-    total_cost[needs_rounding] <-
-        total_cost[needs_rounding] + tab_costs[length(strengths)]
-    total_cost
-}
-
-
-#' Vectorized cost dispatcher
-#'
-#' @param dose_mg Numeric vector of doses in mg.
-#' @param reg     A med_regimen object.
-#' @return Numeric vector of drug costs.
-#' @keywords internal
-cost_single_dose_vec <- function(dose_mg, reg) {
-    if (reg$route %in% VIAL_ROUTES) {
-        cost_iv_vec(dose_mg, reg$vial_sizes, reg$vial_cost,
-                    reg$wastage_threshold)
-    } else if (!is.null(names(reg$unit_cost))) {
-        cost_oral_vec(dose_mg, reg$available_strengths,
-                      cost_per_strength = reg$unit_cost)
-    } else {
-        cost_oral_vec(dose_mg, reg$available_strengths,
-                      cost_per_tablet = reg$unit_cost)
-    }
-}
-
-
-#' Cost of a single administration (dispatch by route)
-#'
-#' When distribution parameters (patient_weight_sd or patient_bsa_sd) are
-#' present, computes the weighted average cost across quantile bins of the
-#' patient parameter distribution.
+#' For a fixed dose, the cost of that dose. With a patient distribution
+#' (\code{patient_weight_sd} or \code{patient_bsa_sd} matching the dose
+#' basis), the expected cost over the lognormal distribution. Under
+#' \code{no_wastage = TRUE}, the lowest cost per mg times the expected dose.
 #'
 #' @param reg A med_regimen object.
-#' @return Numeric scalar: drug cost only (no admin cost) of one admin.
+#' @return Numeric scalar.
 #' @keywords internal
 cost_single_admin_drug <- function(reg) {
-    if (reg$dose_basis == "weight" &&
-        !is.null(reg$patient_weight_sd)) {
-        bins <- generate_cost_bins(
-            reg, reg$patient_weight, reg$patient_weight_sd
-        )
-        return(sum(bins$cost * bins$probability))
+    dist <- regimen_distribution(reg)
+    if (is.null(dist)) {
+        return(cost_single_dose(reg$actual_dose_mg, reg)$cost)
     }
-    if (reg$dose_basis == "bsa" &&
-        !is.null(reg$patient_bsa_sd)) {
-        bins <- generate_cost_bins(
-            reg, reg$patient_bsa, reg$patient_bsa_sd
-        )
-        return(sum(bins$cost * bins$probability))
+    if (reg$no_wastage) {
+        u <- regimen_units(reg)
+        return(reg$actual_dose_mg * min(u$costs / u$sizes))
     }
-    cost_single_dose(reg$actual_dose_mg, reg)
-}
-
-
-#' Calculate the total drug cost for one full medication cycle (oral wastage)
-#'
-#' This is the oral wastage dispensing cost: the full set of tablets dispensed
-#' at the start of a medication cycle.
-#' = cost_per_admin * n_administrations_per_cycle.
-#'
-#' @param reg  A med_regimen object.
-#' @return Numeric scalar: total drug cost for one medication cycle dispensing.
-#' @keywords internal
-cost_oral_cycle_dispensing <- function(reg) {
-    per_admin <- cost_single_admin_drug(reg)
-    per_admin * length(reg$admin_days)
+    bins <- generate_cost_bins(reg, dist$mean, dist$sd)
+    sum(bins$cost * bins$probability)
 }

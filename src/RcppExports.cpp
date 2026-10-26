@@ -10,38 +10,34 @@ Rcpp::Rostream<true>&  Rcpp::Rcout = Rcpp::Rcpp_cout_get();
 Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
-// optimal_vial_cost_single
-List optimal_vial_cost_single(double dose_mg, NumericVector vial_sizes, NumericVector vial_costs, double wastage_threshold);
-RcppExport SEXP _openqalyregimen_optimal_vial_cost_single(SEXP dose_mgSEXP, SEXP vial_sizesSEXP, SEXP vial_costsSEXP, SEXP wastage_thresholdSEXP) {
+// exact_fill_table
+List exact_fill_table(IntegerVector int_sizes, NumericVector costs, int max_amount);
+RcppExport SEXP _openqalyregimen_exact_fill_table(SEXP int_sizesSEXP, SEXP costsSEXP, SEXP max_amountSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< double >::type dose_mg(dose_mgSEXP);
-    Rcpp::traits::input_parameter< NumericVector >::type vial_sizes(vial_sizesSEXP);
-    Rcpp::traits::input_parameter< NumericVector >::type vial_costs(vial_costsSEXP);
-    Rcpp::traits::input_parameter< double >::type wastage_threshold(wastage_thresholdSEXP);
-    rcpp_result_gen = Rcpp::wrap(optimal_vial_cost_single(dose_mg, vial_sizes, vial_costs, wastage_threshold));
+    Rcpp::traits::input_parameter< IntegerVector >::type int_sizes(int_sizesSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type costs(costsSEXP);
+    Rcpp::traits::input_parameter< int >::type max_amount(max_amountSEXP);
+    rcpp_result_gen = Rcpp::wrap(exact_fill_table(int_sizes, costs, max_amount));
     return rcpp_result_gen;
 END_RCPP
 }
-// optimal_vial_cost_vec
-NumericVector optimal_vial_cost_vec(NumericVector dose_mg_vec, NumericVector vial_sizes, NumericVector vial_costs, double wastage_threshold);
-RcppExport SEXP _openqalyregimen_optimal_vial_cost_vec(SEXP dose_mg_vecSEXP, SEXP vial_sizesSEXP, SEXP vial_costsSEXP, SEXP wastage_thresholdSEXP) {
+// cover_best
+IntegerVector cover_best(NumericVector cost);
+RcppExport SEXP _openqalyregimen_cover_best(SEXP costSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< NumericVector >::type dose_mg_vec(dose_mg_vecSEXP);
-    Rcpp::traits::input_parameter< NumericVector >::type vial_sizes(vial_sizesSEXP);
-    Rcpp::traits::input_parameter< NumericVector >::type vial_costs(vial_costsSEXP);
-    Rcpp::traits::input_parameter< double >::type wastage_threshold(wastage_thresholdSEXP);
-    rcpp_result_gen = Rcpp::wrap(optimal_vial_cost_vec(dose_mg_vec, vial_sizes, vial_costs, wastage_threshold));
+    Rcpp::traits::input_parameter< NumericVector >::type cost(costSEXP);
+    rcpp_result_gen = Rcpp::wrap(cover_best(cost));
     return rcpp_result_gen;
 END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_openqalyregimen_optimal_vial_cost_single", (DL_FUNC) &_openqalyregimen_optimal_vial_cost_single, 4},
-    {"_openqalyregimen_optimal_vial_cost_vec", (DL_FUNC) &_openqalyregimen_optimal_vial_cost_vec, 4},
+    {"_openqalyregimen_exact_fill_table", (DL_FUNC) &_openqalyregimen_exact_fill_table, 3},
+    {"_openqalyregimen_cover_best", (DL_FUNC) &_openqalyregimen_cover_best, 1},
     {NULL, NULL, 0}
 };
 

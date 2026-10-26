@@ -2,7 +2,7 @@
 % Please edit documentation in R/summarise_regimen.R
 \name{summarise_regimen}
 \alias{summarise_regimen}
-\title{Print a summary of a regimen's dispensing and administration structure}
+\title{Print a summary of a regimen's dosing, units and costs}
 \usage{
 summarise_regimen(reg)
 }
@@ -13,6 +13,6 @@ summarise_regimen(reg)
 Invisibly returns reg. Called for its side effect (printing).
 }
 \description{
-Shows how dosing translates to tablets/vials, what constitutes a dispensing
-event vs an administration event, and the cost breakdown at each level.
+Shows the dose, the units dispensed per administration, how the drug is
+costed (timing, rounding, wastage) and the fees.
 }

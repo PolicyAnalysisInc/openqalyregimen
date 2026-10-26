@@ -2,19 +2,21 @@
 % Please edit documentation in R/cost_single.R
 \name{cost_single_dose}
 \alias{cost_single_dose}
-\title{Cost of a single dose (dispatch by route)}
+\title{Cost detail of one dose for a regimen}
 \usage{
-cost_single_dose(dose_mg, reg)
+cost_single_dose(dose_mg, reg, tab = NULL)
 }
 \arguments{
-\item{dose_mg}{Numeric. Dose in mg.}
+\item{dose_mg}{Dose in mg.}
 
-\item{reg}{A med_regimen object (for route, vial/tablet info).}
+\item{reg}{A med_regimen object.}
+
+\item{tab}{Optional pre-built table.}
 }
 \value{
-Numeric scalar: drug cost for this dose.
+See \code{cost_dose_detail()}.
 }
 \description{
-Cost of a single dose (dispatch by route)
+Cost detail of one dose for a regimen
 }
 \keyword{internal}
